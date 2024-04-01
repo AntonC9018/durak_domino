@@ -237,7 +237,7 @@ pub const PossibleResponse = struct
     match: ValueIndexMatchPair,
 };
 
-pub fn allOthersLarger(p: struct
+pub fn allDefensesBeatAllAttacks(p: struct
     {
         target: Card,
         play: Card,
@@ -247,13 +247,13 @@ pub fn allOthersLarger(p: struct
 {
     std.debug.assert(p.config.faceCount == 2);
 
-    const otherPlayIndex = (p.match.attack +% 1) % 2;
-    const otherPlayValue = p.play.values[otherPlayIndex];
+    const otherAttackIndex = (p.match.attack +% 1) % 2;
+    const otherAttackValue = p.play.values[otherAttackIndex];
 
-    const otherTargetIndex = (p.match.response +% 1) % 2;
-    const otherTargetValue = p.target.values[otherTargetIndex];
+    const otherDefenseIndex = (p.match.response +% 1) % 2;
+    const otherDefenseValue = p.target.values[otherDefenseIndex];
 
-    if (otherPlayValue < otherTargetValue)
+    if (otherDefenseValue > otherAttackValue)
     {
         return true;
     }
@@ -417,7 +417,7 @@ pub const PossibleResponsesIterator = struct
         {
             while (self.matchesIterator.next()) |n|
             {
-                if (allOthersLarger(.{
+                if (allDefensesBeatAllAttacks(.{
                         .target = self.matchesIterator.defenseCard,
                         .play = self.matchesIterator.attackCard,
                         .match = n,
@@ -446,7 +446,7 @@ pub fn getPossibleResponses(context: *const GameLogicContext) !PossibleResponses
         return error.NoPlay;
     }
     const cardInPlay = (play.attackCard orelse return error.NoCardInPlay);
-    const currentHand = &context.state.hands.items[context.state.attackerIndex()];
+    const currentHand = &context.state.hands.items[context.state.defenderIndex()];
     var iter = PossibleResponsesIterator
     {
         .cardInPlay = cardInPlay,
