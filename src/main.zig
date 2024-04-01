@@ -4,7 +4,7 @@ const maxSideCount = 8;
 
 pub const Card = struct
 {
-    values: CardSide[maxSideCount],
+    values: [maxSideCount]CardSide,
 
     pub fn getValuesSlice(card: anytype, conf: Config)
         switch (@TypeOf(card))
@@ -15,6 +15,47 @@ pub const Card = struct
         }
     {
         return card.values[0 .. conf.faceCount];
+    }
+
+    pub fn print(self: Card, writer: anytype, config: *const Config) !void
+    {
+        try printWithHighlightAt(self, writer, config, null);
+    }
+
+    pub fn printWithHighlightAt(
+        self: Card,
+        writer: anytype,
+        config: *const Config,
+        highlightIndex: ?u8) !void
+    {
+        const values = self.getValuesSlice();
+        for (0 .., values) |i, v|
+        {
+            if (i != 0)
+            {
+                try writer.print("-", .{});
+            }
+
+            const shouldHighlight = if (highlightIndex) |h| i == h else false;
+            if (shouldHighlight)
+            {
+                try writer.print("*", .{});
+            }
+
+            if (v == config.maxValue)
+            {
+                try writer.print(" ", .{});
+            }
+            else
+            {
+                try writer.print("{}", .{ v });
+            }
+
+            if (shouldHighlight)
+            {
+                try writer.print("*", .{});
+            }
+        }
     }
 };
 
@@ -30,7 +71,7 @@ pub const Config = struct
     maxValue: u8,
     faceCount: u8,
     handSize: u8,
-    deckSize: u32,
+    deckSize: u32 = undefined,
     playerCount: u8,
 
     pub fn numValuesForFace(self: *Config) u8
@@ -42,9 +83,9 @@ pub const Config = struct
     {
         const numSelectionForEachFace = self.maxValue + 1;
         const numFaces = self.faceCount;
-        const numCombinations = std.math.powi(numSelectionForEachFace, numFaces);
+        const numCombinations = std.math.powi(u32, numSelectionForEachFace, numFaces) catch unreachable;
         // Do not count duplicates.
-        return numCombinations / 2;
+        self.deckSize = numCombinations / 2;
     }
 };
 
@@ -94,7 +135,7 @@ pub const Play = struct
 {
     attackCard: ?Card = null,
     completePairs: std.ArrayListUnmanaged(CardPair) = .{},
-    nextAllowedValue: ?u8 = null,
+    nextAllowedValue: ?CardSide = null,
 
     pub fn started(self: *const Play) bool
     {
@@ -109,14 +150,14 @@ pub const Play = struct
     }
 };
 
-pub const EndResult = union(enum)
+pub const CompletionStatus = union(enum)
 {
     Lose: u8,
     Incomplete: void,
     Tie: void,
 };
 
-pub fn getEndResult(game: *const GameState) EndResult
+pub fn getCompletionStatus(game: *const GameState) CompletionStatus
 {
     if (game.drawPile.items.len != 0)
     {
@@ -163,14 +204,14 @@ pub fn getEndResult(game: *const GameState) EndResult
 
 pub fn getNextPlayer(game: *const GameState) ?u8
 {
-    var next = game.attackerIndex +% 1;
+    var next = game.attackerIndex() +% 1;
     while (true)
     {
         if (game.hands.items[next].cards.items.len != 0)
         {
             return @intCast(next);
         }
-        if (game.attackerIndex == next)
+        if (game.attackerIndex() == next)
         {
             return null;
         }
@@ -225,6 +266,11 @@ pub const MatchesIteratorState = struct
     targetIndex: u8 = 0,
     matchingWildcards: bool = false,
 };
+
+// pub fn isMatchValid(match: ValueIndexMatchPair) bool
+// {
+// }
+//
 
 pub const MatchesIterator = struct
 {
@@ -322,16 +368,6 @@ pub const MatchesIterator = struct
                     .play = self.playCard,
                 };
 
-                if (allOthersLarger(.{
-                        .target = self.targetCard,
-                        .play = self.playCard,
-                        .match = potentialResult,
-                        .confg = self.config
-                    }))
-                {
-                    continue;
-                }
-
                 return potentialResult;
             }
         }
@@ -377,12 +413,20 @@ pub const PossibleResponsesIterator = struct
     {
         while (!self.isDone())
         {
-            if (self.matchesIterator.next()) |n|
+            while (self.matchesIterator.next()) |n|
             {
-                return .{
-                    .handCardIndex = self.handCardIndex,
-                    .match = n,
-                };
+                if (allOthersLarger(.{
+                        .target = self.matchesIterator.targetCard,
+                        .play = self.matchesIterator.playCard,
+                        .match = n,
+                        .confg = self.config
+                    }))
+                {
+                    return .{
+                        .handCardIndex = self.handCardIndex,
+                        .match = n,
+                    };
+                }
             }
 
             self.resetMatchesIterator();
@@ -407,14 +451,14 @@ pub fn getPossibleResponses(context: *const GameLogicContext) !PossibleResponses
     return iter;
 }
 
-pub const AllCardIterator = struct
+pub const AllPossibleCardEnumerator = struct
 {
     current: Card,
     indexCount: u8,
-    maxValue: u8,
+    maxValue: CardSide,
     done: bool = false,
 
-    pub fn next(self: *AllCardIterator) ?Card
+    pub fn next(self: *AllPossibleCardEnumerator) ?Card
     {
         if (self.done)
         {
@@ -447,17 +491,13 @@ pub fn convertIndexToCard(index: usize, config: *Config) Card
     for (0 .. config.faceCount) |i|
     {
         const faceIndex = config.faceCount - 1 - i;
-        result.values[faceIndex] = currentRemaining % config.numValuesForFace();
+        result.values[faceIndex] = @intCast(currentRemaining % config.numValuesForFace());
         currentRemaining /= config.numValuesForFace();
     }
     return result;
 }
 
-pub fn isWildcard(side: CardSide) bool
-{
-}
-
-pub fn resetState(context: *const GameLogicContext) !void
+pub fn resetState(context: *GameLogicContext) !void
 {
     const cardsNeededForDeal = context.config.playerCount * context.config.handSize;
     if (cardsNeededForDeal > context.config.deckSize)
@@ -476,25 +516,28 @@ pub fn resetState(context: *const GameLogicContext) !void
     {
         const drawPile = &context.state.drawPile.items;
         drawPile.len = context.config.deckSize;
-        for (0 .., drawPile) |i, *card|
+        for (0 .., drawPile.*) |i, *card|
         {
             card.* = convertIndexToCard(i, context.config);
         }
 
         // Shuffle deck
-        for (drawPile) |*card|
+        for (drawPile.*) |*card|
         {
             const i = context.randomState.random().int(usize) % drawPile.len;
 
             const t = card.*;
-            card.* = drawPile[i];
-            drawPile[i] = t;
+            card.* = drawPile.*[i];
+            drawPile.*[i] = t;
         }
     }
 
     context.state.discardPile.items.len = 0;
-    context.state.attackerIndex = 0;
-    context.state.play = null;
+    context.state.turnIndices = .{
+        .attacker = 0,
+        .defender = 1,
+    };
+    context.state.play.reset();
 
     const hands = &context.state.hands.items;
     {
@@ -521,10 +564,10 @@ pub fn resetState(context: *const GameLogicContext) !void
     // Deal cards
     for (hands.*) |*hand|
     {
-        hand.cards.ensureTotalCapacity(context.config.handSize);
+        try hand.cards.ensureTotalCapacity(context.allocator, context.config.handSize);
         hand.cards.items.len = context.config.handSize;
         const drawPile = &context.state.drawPile.items;
-        for (hand.cards, drawPile[(drawPile.len - context.config.handSize) ..]) |*card, draw|
+        for (hand.cards.items, drawPile.*[(drawPile.len - context.config.handSize) ..]) |*card, draw|
         {
             card.* = draw;
         }
@@ -766,6 +809,562 @@ pub fn gameStateHelper(context: *GameLogicContext)
     return .ThrowIntoPlayOrEnd;
 }
 
+pub const PossibleAttackersIterator = struct
+{
+    context: *GameLogicContext,
+    currentIndex: u8 = undefined,
+    done: bool = false,
+
+    pub fn init(self: *PossibleAttackersIterator) void
+    {
+        self.currentIndex = self.initialIndex();
+    }
+
+    fn initialIndex(self: *const PossibleAttackersIterator) u8
+    {
+        return self.context.state.attackerIndex();
+    }
+
+    pub fn next(self: *PossibleAttackersIterator) ?u8
+    {
+        if (self.done)
+        {
+            return null;
+        }
+
+        const result = self.currentIndex;
+
+        while (true)
+        {
+            const nextIndex = findNextNotDonePlayerIndex(
+                self.state,
+                self.currentIndex,
+                self.initialIndex());
+            if (nextIndex) |i|
+            {
+                self.currentIndex = i;
+
+                if (i == self.context.state.defenderIndex())
+                {
+                    continue;
+                }
+            }
+            else
+            {
+                self.done = true;
+            }
+
+            return result;
+        }
+    }
+};
+
+pub fn endPlayAndTurn(context: *GameLogicContext) !void
+{
+    try endPlay(context);
+    try redraw(context);
+    try moveTurnToNextPlayer(context);
+}
+
+pub fn getCardsAllowedForThrow(context: *GameLogicContext, playerIndex: u8) OptionsIterator
+{
+    return .{
+        .allowedValue = context.state.play.nextAllowedValue.?,
+        .hand = &context.state.hands.items[playerIndex],
+        .config = context.config,
+    };
+}
+
+pub const OptionsIterator = struct
+{
+    allowedValue: CardSide,
+    hand: *const Hand,
+    cardIndex: usize = 0,
+    config: *const Config,
+
+    pub fn next(self: *OptionsIterator) ?usize
+    {
+        const cards = self.hand.cards.items;
+        while (self.cardIndex < cards.len)
+        {
+            defer
+            {
+                self.cardIndex += 1;
+            }
+
+            const card = cards[self.cardIndex];
+            for (card.getValuesSlice(self.config)) |v|
+            {
+                if (self.allowedValue == v)
+                {
+                    return self.cardIndex;
+                }
+            }
+        }
+        return null;
+    }
+};
+
+const UiContext = struct
+{
+    attackersIterator: ?PossibleAttackersIterator,
+};
+
+fn showGameOver(context: *GameLogicContext, cout: anytype) !bool
+{
+    const endState = getCompletionStatus(context.state);
+    switch (endState)
+    {
+        .Incomplete =>
+        {
+            return false;
+        },
+        .Lose => |i|
+        {
+            try cout.print("Player {} loses.\n", .{ i });
+        },
+        .Tie =>
+        {
+            try cout.print("Tie.\n", .{});
+        },
+    }
+    return true;
+}
+
+fn IterOutputType(IterMaybePointerT: type) type
+{
+    const IterT = IterT: 
+    {
+        const info = @typeInfo(IterMaybePointerT);
+        switch (info)
+        {
+            .Pointer => |p| break :IterT p.child,
+            .Struct => break :IterT IterMaybePointerT,
+            else => unreachable,
+        }
+    };
+    const T = @TypeOf(b: {
+        var t = @as(IterT, undefined);
+        break :b t.next();
+    });
+    return T;
+}
+
+fn CollectOptionsResult(IterT: type, comptime allowEmptyOption: bool) type
+{
+    const T = IterOutputType(IterT);
+    if (allowEmptyOption)
+    {
+        return union(enum)
+        {
+            Empty: void,
+            Value: T,
+        };
+    }
+
+    return T;
+}
+
+fn collectOptionsFromIteratorAndSelectOne(
+    allocator: std.mem.Allocator,
+    iter: anytype,
+    cout: anytype,
+    comptime emptyLabel: ?[]const u8) 
+    
+    !CollectOptionsResult(@TypeOf(iter), emptyLabel != null)
+{
+    const allowEmptyOption = emptyLabel != null;
+    std.debug.assert(@typeInfo(@TypeOf(iter)) == .Pointer);
+
+    const OptionType = IterOutputType(@TypeOf(iter));
+    var list = std.mem.zeroInit(std.ArrayList(OptionType), .{
+        .allocator = allocator,
+    });
+    defer list.deinit();
+
+    while (iter.next()) |n|
+    {
+        try list.append(n);
+    }
+
+    if (list.items.len == 0)
+    {
+        if (allowEmptyOption)
+        {
+            return .{ .Empty = {} };
+        }
+        unreachable;
+    }
+
+    const optionCount = optionCount:
+    {
+        var optionIndex: usize = 0;
+        if (emptyLabel) |label|
+        {
+            try cout.print("{}: " ++ label ++ "\n", .{ optionIndex });
+            optionIndex += 1;
+        }
+
+        for (list.items) |n|
+        {
+            try cout.print("{}: {}\n", .{ optionIndex, n }); 
+            optionIndex += 1;
+        }
+
+        break :optionCount optionIndex;
+    };
+
+    while (true)
+    {
+        const reader = std.io.getStdIn().reader();
+        const arr = try reader.readUntilDelimiterOrEofAlloc(allocator, '\n', 9999)
+            orelse
+            {
+                try cout.print("Nothing given as input?\n", .{});
+                continue;
+            };
+        defer allocator.free(arr);
+
+        const inputOption = std.fmt.parseInt(usize, arr, 10)
+            catch |err|
+            {
+                switch (err)
+                {
+                    error.Overflow =>
+                    {
+                        try cout.print("The number {s} is too large.\n", .{ arr });
+                        continue;
+                    },
+                    error.InvalidCharacter =>
+                    {
+                        try cout.print("Invalid character in number {}.\n", .{ arr });
+                        continue;
+                    },
+                }
+            };
+
+        if (inputOption >= optionCount)
+        {
+            try cout.print("The input {} is too large.\n", .{ inputOption });
+            continue;
+        }
+
+        const iteratorOption = iteratorOption:
+        {
+            if (allowEmptyOption and inputOption == 0)
+            {
+                return .{ .Empty = {} };
+            }
+            break :iteratorOption inputOption - 1;
+        };
+
+        const result = arr[iteratorOption];
+        if (allowEmptyOption)
+        {
+            return .{ .Value = result };
+        }
+        return result;
+    }
+}
+
+const RangeIter = struct
+{
+    currentIndex: usize = 0,
+    lastIndex: usize,
+
+    pub fn next(self: *RangeIter) ?usize
+    {
+        if (self.currentIndex > self.lastIndex)
+        {
+            return null;
+        }
+
+        defer self.currentIndex += 1;
+
+        return self.currentIndex;
+    }
+};
+
+fn SliceIter(T: type) type
+{
+    return struct
+    {
+        const Self = @This();
+
+        ptr: [*]T,
+        rangeIter: RangeIter,
+
+        pub fn next(self: *Self) ?*T
+        {
+            if (self.rangeIter.next()) |n|
+            {
+                return &self.ptr[n];
+            }
+
+            return null;
+        }
+    };
+}
+
+const CardInHandContext = struct
+{
+    hand: *const Hand,
+    config: *const Config,
+};
+
+const CardInHand = struct
+{
+    context: CardInHandContext,
+    cardIndex: usize,
+
+    pub fn card(self: *const CardInHand) Card
+    {
+        return self.context.hand.cards.items[self.cardIndex];
+    }
+
+    pub fn format(
+        self: *const CardInHand,
+        comptime _: []const u8,
+        _: std.fmt.FormatOptions,
+        writer: anytype) !void
+    {
+        try self.card().print(writer, self.context.config);
+    }
+};
+
+pub fn wrapCardIndex(value: usize, context: CardInHandContext) CardInHand
+{
+    return .{
+        .context = context,
+        .cardIndex = value,
+    };
+}
+
+const CardsInHandIter = struct
+{
+    rangeIter: RangeIter = undefined,
+    context: CardInHandContext,
+
+    pub fn init(self: *CardsInHandIter) void
+    {
+        self.rangeIter = .{
+            .lastIndex = self.context.hand.cards.items.len,
+        };
+    }
+
+    pub fn next(self: *CardsInHandIter) ?CardInHand
+    {
+        if (self.rangeIter.next()) |n|
+        {
+            return .{
+                .cardIndex = n,
+                .context = self.context,
+            };
+        }
+
+        return null;
+    }
+};
+
+pub fn playerVisualCardsIterator(context: *GameLogicContext, playerIndex: u8) CardsInHandIter
+{
+    var t = CardsInHandIter
+    {
+        .context = .{
+            .hand = &context.state.hands.items[playerIndex],
+            .config = context.config,
+        },
+    };
+    t.init();
+    return t;
+}
+
+fn WrapIter(
+    TIter: type,
+    TContext: type,
+    // fn(@TypeOf(TIter), TContext) -> Wrapped(@TypeOf(TIter))
+    wrapFunc: anytype) type
+{
+    const IterOutputT = Iter:
+    {
+        const t = @TypeOf(@as(TIter, undefined).next());
+        const info = @typeInfo(t);
+        break :Iter info.Optional.child;
+    };
+    const WrappedIterOutputType = @TypeOf(
+        wrapFunc(
+            @as(IterOutputT, undefined),
+            @as(TContext, undefined)));
+
+    return struct
+    {
+        const Self = @This();
+
+        iter: TIter,
+        context: TContext,
+
+        pub fn next(self: *Self) ?WrappedIterOutputType
+        {
+            if (self.iter.next()) |n|
+            {
+                return wrapFunc(n, self.context);
+            }
+            return null;
+        }
+    };
+}
+
+const CardResponseWrapper = struct
+{
+    response: PossibleResponse,
+    context: *GameLogicContext,
+
+    pub fn format(
+        self: *const CardResponseWrapper,
+        comptime _: []const u8,
+        _: std.fmt.FormatOptions,
+        writer: anytype) !void
+    {
+        const r = self.response;
+        const playerHand = &self.context.state.hands.items[self.context.state.defenderIndex()];
+
+        const response: Card = playerHand.cards.items[r.handCardIndex];
+        try response.print(writer, self.context.config);
+        try writer.print(" -- ");
+        try response.printWithHighlightAt(writer, self.context.config, r.match.response);
+    }
+};
+
+fn wrapResponse(a: PossibleResponse, b: *GameLogicContext) CardResponseWrapper
+{
+    return .{
+        .response = a,
+        .context = b,
+    };
+}
+
+fn wrapResponseIter(context: *GameLogicContext, iter: PossibleResponsesIterator) 
+    WrapIter(PossibleResponsesIterator, GameLogicContext, wrapResponse)
+{
+    return .{
+        .context = context,
+        .iter = iter,
+    };
+}
+
+fn wrapCardIndexIterator(context: anytype, iter: anytype)
+    WrapIter(@TypeOf(iter), @TypeOf(context), wrapCardIndex)
+{
+    return .{
+        .context = context,
+        .iter = iter,
+    };
+}
+
+pub fn getAndRealizeAttackerThrowOption(uiContext: *UiContext, context: *GameLogicContext, cout: anytype) !bool
+{
+    while (uiContext.attackersIterator.?.next()) |playerIndex|
+    {
+        const iter = getCardsAllowedForThrow(context, playerIndex);
+        const printableIter = wrapCardIndexIterator(context, iter);
+        const selectedOption = try collectOptionsFromIteratorAndSelectOne(
+            context.allocator,
+            printableIter,
+            cout,
+            "Skip");
+
+        switch (selectedOption)
+        {
+            .Empty => continue,
+            .Value => |v| 
+            {
+                try throwIntoPlay(context, playerIndex, v.cardIndex);
+                return true;
+            }
+        }
+    }
+    return false;
+}
+    
+pub fn gameLogicLoop(context: *GameLogicContext, uiContext: *UiContext) !bool
+{
+    const cout = std.io.getStdOut().writer();
+
+    if (try showGameOver(context, cout))
+    {
+        return true;
+    }
+
+    switch (gameStateHelper(context))
+    {
+        .Play =>
+        {
+            var iter = playerVisualCardsIterator(
+                context,
+                context.state.attackerIndex());
+            const selectedOption = try collectOptionsFromIteratorAndSelectOne(
+                // can use arena here easily.
+                context.allocator,
+                &iter,
+                cout,
+                null);
+            try startPlayCard(context, selectedOption.cardIndex);
+        },
+        .Respond =>
+        {
+            const responsesIter = try getPossibleResponses(context);
+            var wrappedIter = wrapResponseIter(context, responsesIter);
+            const selectedResponse = try collectOptionsFromIteratorAndSelectOne(
+                context.allocator,
+                &wrappedIter,
+                cout,
+                "Take all");
+
+            switch (selectedResponse.response)
+            {
+                .Empty => try takePlayIntoHand(context),
+                .Value => |v| try respond(context, v),
+            }
+        },
+        .ThrowIntoPlayOrEnd =>
+        {
+            if (!isDefenderAbleToRespond(context.state))
+            {
+                endPlayAndTurn(context)
+                    catch |err|
+                    {
+                        switch (err)
+                        {
+                            error.GameOver =>
+                            {
+                                const good = try showGameOver(context, cout);
+                                std.debug.assert(good);
+                                return true;
+                            },
+                            else => return err,
+                        }
+                    };
+                return false;
+            }
+
+            if (uiContext.attackersIterator == null)
+            {
+                uiContext.attackersIterator = .{};
+                uiContext.attackersIterator.?.init();
+            }
+
+            const didSomeOption = try getAndRealizeAttackerThrowOption(uiContext, context);
+            uiContext.attackersIterator = null;
+
+            if (!didSomeOption)
+            {
+                try endPlayAndTurn(context);
+            }
+        },
+    }
+    return false;
+}
+
 pub fn main() !void
 {
     var config = Config
@@ -780,77 +1379,26 @@ pub fn main() !void
     var gameState = GameState
     {
     };
-    resetState(gameState);
 
-    const context = GameLogicContext
+    var context = GameLogicContext
     {
         .allocator = std.heap.page_allocator,
         .state = &gameState,
         .randomState = std.rand.DefaultPrng.init(@bitCast(std.time.timestamp())),
         .config = &config,
     };
+    try resetState(&context);
 
-    const cout = std.io.getStdOut().writer();
+    var uiContext = UiContext
+    {
+        .attackersIterator = null,
+    };
 
     while (true)
-    { 
-        const endState = getEndResult(context);
-        switch (endState)
+    {
+        if (try gameLogicLoop(&context, &uiContext))
         {
-            .Incomplete => {},
-            .Lose => |i|
-            {
-                cout.print("Player {} loses.\n", .{ i });
-                return 0;
-            },
-            .Tie =>
-            {
-                cout.print("Tie.\n", .{});
-                return 0;
-            },
-        }
-
-        switch (gameStateHelper(context))
-        {
-            .Play =>
-            {
-                // select a card to play...
-                const selectedCardIndex: u8 = 0;
-                try startPlayCard(context, selectedCardIndex);
-            },
-            .Respond =>
-            {
-                const possibleResponses = try getPossibleResponses(context);
-                if (possibleResponses.next()) |firstOption|
-                {
-                    try respond(context, firstOption);
-                }
-                else
-                {
-                    try takePlayIntoHand(context);
-                }
-            },
-            .ThrowIntoPlayOrEnd =>
-            {
-                // player index that's going to throw.
-                const playerToThrow = context.state.attackerIndex();
-                // get options (iterator)
-                // select option
-                if (context.state.hands.items[playerToThrow].cards.items.len > 0
-                    and isDefenderAbleToRespond(context.state))
-                {
-                    const selectedCardIndex = 0;
-                    // throw or go to next player
-                    try throwIntoPlay(context, playerToThrow, selectedCardIndex);
-                }
-                // end at the end.
-                else
-                {
-                    try endPlay(context);
-                    try redraw(context);
-                    try moveTurnToNextPlayer(context);
-                }
-            },
+            return 0;
         }
     }
 }
