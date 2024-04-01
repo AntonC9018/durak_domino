@@ -100,11 +100,8 @@ pub const GameState = struct
     hands: std.ArrayListUnmanaged(Hand) = .{},
     drawPile: std.ArrayListUnmanaged(Card) = .{},
     discardPile: std.ArrayListUnmanaged(Card) = .{},
-    turnIndices: CurrentPlayers = .{
-        .attacker = 0,
-        .defender = 1,
-    },
-    play: Play = .{},
+    turnIndices: CurrentPlayers = undefined,
+    play: Play = undefined,
 
     pub fn attackerIndex(self: *const GameState) u8
     {
@@ -473,10 +470,11 @@ pub const AllPossibleCardEnumerator = struct
 
         const indicesSlice = self.current.values[0 .. self.indexCount];
         const currentCard = self.current; 
-        for (indicesSlice) |*i|
+        for (0 .., indicesSlice) |sideIndex, *i|
         {
             i.* += 1;
-            if (i.* == self.maxValue)
+            if (i.* == self.maxValue
+                or (sideIndex > 0 and indicesSlice[sideIndex - 1] >= i.*))
             {
                 i.* = 0;
             }
@@ -490,6 +488,7 @@ pub const AllPossibleCardEnumerator = struct
     }
 };
 
+// TODO: This is wrong.
 pub fn convertIndexToCard(index: usize, config: *Config) Card
 {
     var result = std.mem.zeroes(Card);
@@ -975,7 +974,11 @@ fn CollectOptionsResult(IterT: type, comptime allowEmptyOption: bool) type
     {
         return union(enum)
         {
-            Empty: void,
+            Empty: enum
+            {
+                forced,
+                manual,
+            },
             Value: T,
         };
     }
@@ -1009,7 +1012,7 @@ fn collectOptionsFromIteratorAndSelectOne(
     {
         if (allowEmptyOption)
         {
-            return .{ .Empty = {} };
+            return .{ .Empty = .forced };
         }
         unreachable;
     }
@@ -1071,7 +1074,7 @@ fn collectOptionsFromIteratorAndSelectOne(
         {
             if (allowEmptyOption and inputOption == 0)
             {
-                return .{ .Empty = {} };
+                return .{ .Empty = .manual };
             }
             if (allowEmptyOption)
             {
@@ -1278,16 +1281,36 @@ fn wrapCardIndexIterator(context: CardInHandContext, iter: anytype)
     };
 }
 
+pub fn printHand(
+    context: CardInHandContext,
+    cout: anytype) !void
+{
+    for (0 .., context.hand.cards.items) |i, c|
+    {
+        if (i != 0)
+        {
+            try cout.print(" | ", .{});
+        }
+        try c.print(cout, context.config);
+    }
+}
+
 pub fn getAndRealizeAttackerThrowOption(uiContext: *UiContext, context: *GameLogicContext, cout: anytype) !bool
 {
     while (uiContext.attackersIterator.?.next()) |playerIndex|
     {
+        const cardHandContext = CardInHandContext
+        {
+            .config = context.config,
+            .hand = &context.state.hands.items[playerIndex],
+        };
+        try cout.print("Player {}'s hand: ", .{ playerIndex });
+        try printHand(cardHandContext, cout);
+        try cout.print("\n", .{});
+        try cout.print("Player {} selects a card to throw in: ", .{ playerIndex });
+
         const iter = getCardsAllowedForThrow(context, playerIndex);
-        var printableIter = wrapCardIndexIterator(CardInHandContext
-            {
-                .config = context.config,
-                .hand = &context.state.hands.items[playerIndex],
-            }, iter);
+        var printableIter = wrapCardIndexIterator(cardHandContext, iter);
         const selectedOption = try collectOptionsFromIteratorAndSelectOne(
             context.allocator,
             &printableIter,
