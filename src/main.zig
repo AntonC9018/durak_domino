@@ -6,7 +6,7 @@ pub const Card = struct
 {
     values: [maxSideCount]CardSide,
 
-    pub fn getValuesSlice(card: anytype, conf: Config)
+    pub fn getValuesSlice(card: anytype, conf: *const Config)
         switch (@TypeOf(card))
         {
             *Card => []CardSide,
@@ -28,7 +28,7 @@ pub const Card = struct
         config: *const Config,
         highlightIndex: ?u8) !void
     {
-        const values = self.getValuesSlice();
+        const values = self.getValuesSlice(config);
         for (0 .., values) |i, v|
         {
             if (i != 0)
@@ -233,7 +233,7 @@ pub const ValueIndexMatchPair = struct
 
 pub const PossibleResponse = struct
 {
-    handCardIndex: u8,
+    handCardIndex: usize,
     match: ValueIndexMatchPair,
 };
 
@@ -242,7 +242,7 @@ pub fn allOthersLarger(p: struct
         target: Card,
         play: Card,
         match: ValueIndexMatchPair,
-        config: *Config,
+        config: *const Config,
     }) bool
 {
     std.debug.assert(p.config.faceCount == 2);
@@ -262,8 +262,8 @@ pub fn allOthersLarger(p: struct
 
 pub const MatchesIteratorState = struct
 {
-    playIndex: u8 = 0,
-    targetIndex: u8 = 0,
+    attackIndex: u8 = 0,
+    defenseIndex: u8 = 0,
     matchingWildcards: bool = false,
 };
 
@@ -275,8 +275,8 @@ pub const MatchesIteratorState = struct
 pub const MatchesIterator = struct
 {
     state: MatchesIteratorState,
-    playCard: Card,
-    targetCard: Card,
+    attackCard: Card,
+    defenseCard: Card,
     config: *const Config,
 
     pub fn advance(self: *MatchesIterator) void
@@ -284,33 +284,33 @@ pub const MatchesIterator = struct
         const s = &self.state;
         if (s.matchingWildcards)
         {
-            s.targetIndex += 1;
+            s.defenseIndex += 1;
             return;
         }
 
-        if (s.targetIndex < self.config.faceCount - 1)
+        if (s.defenseIndex < self.config.faceCount - 1)
         {
-            s.targetIndex += 1;
+            s.defenseIndex += 1;
             return;
         }
 
-        s.targetIndex = 0;
+        s.defenseIndex = 0;
 
-        if (s.playIndex < self.config.faceCount - 1)
+        if (s.attackIndex < self.config.faceCount - 1)
         {
-            s.playIndex += 1;
+            s.attackIndex += 1;
             return;
         }
 
         s.matchingWildcards = true;
-        s.playIndex = 0;
-        s.targetIndex = 0;
+        s.attackIndex = 0;
+        s.defenseIndex = 0;
     }
 
     pub fn isDone(self: *const MatchesIterator) bool
     {
         const s = &self.state;
-        return s.targetIndex == self.config.maxSideCount;
+        return s.defenseIndex == self.config.faceCount;
     }
 
     pub fn next(self: *MatchesIterator) ?ValueIndexMatchPair
@@ -323,24 +323,24 @@ pub const MatchesIterator = struct
                 self.advance();
             }
 
-            const targetValue = self.targetCard.values[state.targetIndex];
+            const defenseValue = self.defenseCard.values[state.defenseIndex];
             if (state.matchingWildcards)
             {
-                if (self.valuePlay != self.config.maxValue)
+                if (defenseValue != self.config.maxValue)
                 {
                     continue;
                 }
 
                 const largestIndex = largestIndex:
                 {
-                    var maxIndex = if (state.targetIndex == 0) 1 else 0;
-                    for (maxIndex + 1 .., self.targetCard.getValuesSlice(self.config)) |i, b|
+                    var maxIndex: usize = if (state.attackIndex == 0) 1 else 0;
+                    for ((maxIndex + 1) .., self.attackCard.getValuesSlice(self.config)) |i, b|
                     {
-                        if (i == state.targetIndex)
+                        if (i == state.defenseIndex)
                         {
                             continue;
                         }
-                        const a = self.playCard.values[maxIndex];
+                        const a = self.attackCard.values[maxIndex];
                         if (b > a)
                         {
                             maxIndex = i;
@@ -350,22 +350,23 @@ pub const MatchesIterator = struct
                 };
 
                 return .{
-                    .target = state.targetIndex,
-                    .play = largestIndex,
+                    .response = state.defenseIndex,
+                    .attack = @intCast(largestIndex),
                 };
             }
             else
             {
-                const playValue = self.playCard.values[state.playIndex];
+                const playValue = self.attackCard.values[state.attackIndex];
 
-                if (playValue != targetValue)
+                if (playValue != defenseValue)
                 {
                     continue;
                 }
 
-                const potentialResult = .{
-                    .target = state.targetIndex,
-                    .play = self.playCard,
+                const potentialResult = ValueIndexMatchPair
+                {
+                    .response = state.defenseIndex,
+                    .attack = state.attackIndex,
                 };
 
                 return potentialResult;
@@ -401,9 +402,10 @@ pub const PossibleResponsesIterator = struct
 
     pub fn resetMatchesIterator(self: *PossibleResponsesIterator) void
     {
-        self.matchesIterator = .{
-            .playCard = self.cardInPlay,
-            .targetCard = self.currentHand.cards.items[self.handCardIndex],
+        self.matchesIterator = MatchesIterator
+        {
+            .attackCard = self.cardInPlay,
+            .defenseCard = self.currentHand.cards.items[self.handCardIndex],
             .config = self.config,
             .state = .{},
         };
@@ -416,10 +418,10 @@ pub const PossibleResponsesIterator = struct
             while (self.matchesIterator.next()) |n|
             {
                 if (allOthersLarger(.{
-                        .target = self.matchesIterator.targetCard,
-                        .play = self.matchesIterator.playCard,
+                        .target = self.matchesIterator.defenseCard,
+                        .play = self.matchesIterator.attackCard,
                         .match = n,
-                        .confg = self.config
+                        .config = self.config,
                     }))
                 {
                     return .{
@@ -438,9 +440,13 @@ pub const PossibleResponsesIterator = struct
 
 pub fn getPossibleResponses(context: *const GameLogicContext) !PossibleResponsesIterator
 {
-    const play = &(context.state.play orelse return error.NoPlay);
-    const cardInPlay = &(play.incompletePair orelse return error.NoCardInPlay);
-    const currentHand = &context.state.hands.items[context.state.attackerIndex];
+    const play = &context.state.play;
+    if (!play.started())
+    {
+        return error.NoPlay;
+    }
+    const cardInPlay = (play.attackCard orelse return error.NoCardInPlay);
+    const currentHand = &context.state.hands.items[context.state.attackerIndex()];
     var iter = PossibleResponsesIterator
     {
         .cardInPlay = cardInPlay,
@@ -539,22 +545,22 @@ pub fn resetState(context: *GameLogicContext) !void
     };
     context.state.play.reset();
 
-    const hands = &context.state.hands.items;
+    const hands = &context.state.hands;
     {
-        const oldPlayerCount = hands.len;
+        const oldPlayerCount = hands.items.len;
         if (context.config.playerCount < oldPlayerCount)
         {
-            for (hands.*[context.config.playerCount .. oldPlayerCount]) |*hand|
+            for (hands.items[context.config.playerCount .. oldPlayerCount]) |*hand|
             {
                 hand.cards.deinit(context.allocator);
             }
         }
 
-        hands.len = context.config.playerCount;
+        try hands.resize(context.allocator, context.config.playerCount);
 
-        if (oldPlayerCount > context.config.playerCount)
+        if (oldPlayerCount < context.config.playerCount)
         {
-            for (hands.*[oldPlayerCount .. context.config.playerCount]) |*hand|
+            for (hands.items[oldPlayerCount .. context.config.playerCount]) |*hand|
             {
                 hand.* = .{};
             }
@@ -562,10 +568,9 @@ pub fn resetState(context: *GameLogicContext) !void
     }
 
     // Deal cards
-    for (hands.*) |*hand|
+    for (hands.items) |*hand|
     {
-        try hand.cards.ensureTotalCapacity(context.allocator, context.config.handSize);
-        hand.cards.items.len = context.config.handSize;
+        try hand.cards.resize(context.allocator, context.config.handSize);
         const drawPile = &context.state.drawPile.items;
         for (hand.cards.items, drawPile.*[(drawPile.len - context.config.handSize) ..]) |*card, draw|
         {
@@ -575,7 +580,7 @@ pub fn resetState(context: *GameLogicContext) !void
     }
 }
 
-pub fn removeCardFromHand(hand: *Hand, cardIndex: u8) !Card
+pub fn removeCardFromHand(hand: *Hand, cardIndex: usize) !Card
 {
     const cards = &hand.cards;
     if (cardIndex >= cards.items.len - 1)
@@ -587,7 +592,7 @@ pub fn removeCardFromHand(hand: *Hand, cardIndex: u8) !Card
     return card;
 }
 
-pub fn startPlayCard(context: *GameLogicContext, cardIndex: u8) !void
+pub fn startPlayCard(context: *GameLogicContext, cardIndex: usize) !void
 {
     if (context.state.play.started())
     {
@@ -608,12 +613,14 @@ pub fn respond(context: *GameLogicContext, response: PossibleResponse) !void
     const attackCard = play.attackCard
         orelse return error.MustAttackFirst;
 
-    const responseCard = try removeCardFromHand(response.handCardIndex);
+    const responseCard = try removeCardFromHand(
+        getDefenderHand(context.state),
+        response.handCardIndex);
 
     play.attackCard = null;
 
-    const allowedValue = responseCard.values[response.match.response];
-    std.debug.assert(allowedValue == attackCard.values[response.match.attack]);
+    const allowedValue = attackCard.values[response.match.attack];
+    std.debug.print("Allowed: {}, Response: {}\n", .{allowedValue, responseCard.values[response.match.response] });
 
     play.nextAllowedValue = allowedValue;
     try play.completePairs.append(context.allocator, .{
@@ -622,25 +629,31 @@ pub fn respond(context: *GameLogicContext, response: PossibleResponse) !void
     });
 }
 
+pub fn getDefenderHand(state: *const GameState) *Hand
+{
+    const defenderHand = &state.hands.items[state.defenderIndex()];
+    return defenderHand;
+}
+
 pub fn isDefenderAbleToRespond(state: *const GameState) bool
 {
-    const defenderHand = state.hands.items[state.defenderIndex()];
+    const defenderHand = getDefenderHand(state);
     return (defenderHand.cards.items.len == 0);
 }
 
-pub fn throwIntoPlay(context: *GameLogicContext, playerIndex: u8, cardIndex: u8) !void
+pub fn throwIntoPlay(context: *GameLogicContext, playerIndex: u8, cardIndex: usize) !void
 {
     if (!isDefenderAbleToRespond(context.state))
     {
         return error.DefenderWontBeAbleToRespond;
     }
 
-    const hand = &context.state.hands[playerIndex].items;
+    const hand = &context.state.hands.items[playerIndex];
     const card = try removeCardFromHand(hand, cardIndex);
     blk: {
         const nextAllowedValue = context.state.play.nextAllowedValue 
             orelse return error.NextAllowedValueUninitialized;
-        for (card.getValuesSlice()) |side|
+        for (card.getValuesSlice(context.config)) |side|
         {
             if (side == nextAllowedValue)
             {
@@ -678,7 +691,7 @@ pub fn moveTurnToNextPlayer(context: *GameLogicContext) !void
     a.* = findNextNotDonePlayerIndex(context, a.*, a.*)
         orelse return error.GameOver;
     const newDefender = findNextNotDonePlayerIndex(context, a.*, initialAttacker)
-        orelse error.GameOver;
+        orelse return error.GameOver;
 
     context.state.turnIndices = .{ 
         .attacker = newAttacker,
@@ -689,7 +702,7 @@ pub fn moveTurnToNextPlayer(context: *GameLogicContext) !void
 pub fn movePlayPairsInto(
     allocator: std.mem.Allocator,
     play: *Play,
-    into: std.ArrayListUnmanaged(Card)) !void
+    into: *std.ArrayListUnmanaged(Card)) !void
 {
     const added = try into.addManyAsSlice(
         allocator,
@@ -740,7 +753,7 @@ pub fn redraw(context: *GameLogicContext) !void
     var currentIndex = startIndex;
     while (true)
     {
-        const hand = context.state.hands.items[currentIndex];
+        const hand = &context.state.hands.items[currentIndex];
         if (hand.cards.items.len >= context.config.handSize)
         {
             currentIndex = (currentIndex +% 1) % context.config.playerCount;
@@ -778,7 +791,7 @@ pub fn takePlayIntoHand(context: *GameLogicContext) !void
         return error.PlayMustBeStartedToTake;
     }
 
-    const hand = context.state.hands.items[context.state.defenderIndex()];
+    const hand = &context.state.hands.items[context.state.defenderIndex()];
     if (play.attackCard) |a|
     {
         try hand.cards.append(context.allocator, a);
@@ -837,7 +850,7 @@ pub const PossibleAttackersIterator = struct
         while (true)
         {
             const nextIndex = findNextNotDonePlayerIndex(
-                self.state,
+                self.context,
                 self.currentIndex,
                 self.initialIndex());
             if (nextIndex) |i|
@@ -931,6 +944,15 @@ fn showGameOver(context: *GameLogicContext, cout: anytype) !bool
     return true;
 }
 
+fn IterValueType(IterT: type) type
+{
+    const T = @TypeOf(b: {
+        var t = @as(IterT, undefined);
+        break :b t.next().?;
+    });
+    return T;
+}
+
 fn IterOutputType(IterMaybePointerT: type) type
 {
     const IterT = IterT: 
@@ -943,11 +965,7 @@ fn IterOutputType(IterMaybePointerT: type) type
             else => unreachable,
         }
     };
-    const T = @TypeOf(b: {
-        var t = @as(IterT, undefined);
-        break :b t.next();
-    });
-    return T;
+    return IterValueType(IterT);
 }
 
 fn CollectOptionsResult(IterT: type, comptime allowEmptyOption: bool) type
@@ -1037,7 +1055,7 @@ fn collectOptionsFromIteratorAndSelectOne(
                     },
                     error.InvalidCharacter =>
                     {
-                        try cout.print("Invalid character in number {}.\n", .{ arr });
+                        try cout.print("Invalid character in number {s}.\n", .{ arr });
                         continue;
                     },
                 }
@@ -1055,10 +1073,14 @@ fn collectOptionsFromIteratorAndSelectOne(
             {
                 return .{ .Empty = {} };
             }
-            break :iteratorOption inputOption - 1;
+            if (allowEmptyOption)
+            {
+                break :iteratorOption inputOption - 1;
+            }
+            break :iteratorOption inputOption;
         };
 
-        const result = arr[iteratorOption];
+        const result = list.items[iteratorOption];
         if (allowEmptyOption)
         {
             return .{ .Value = result };
@@ -1070,11 +1092,11 @@ fn collectOptionsFromIteratorAndSelectOne(
 const RangeIter = struct
 {
     currentIndex: usize = 0,
-    lastIndex: usize,
+    count: usize,
 
     pub fn next(self: *RangeIter) ?usize
     {
-        if (self.currentIndex > self.lastIndex)
+        if (self.currentIndex >= self.count)
         {
             return null;
         }
@@ -1148,7 +1170,7 @@ const CardsInHandIter = struct
     pub fn init(self: *CardsInHandIter) void
     {
         self.rangeIter = .{
-            .lastIndex = self.context.hand.cards.items.len,
+            .count = self.context.hand.cards.items.len,
         };
     }
 
@@ -1185,12 +1207,7 @@ fn WrapIter(
     // fn(@TypeOf(TIter), TContext) -> Wrapped(@TypeOf(TIter))
     wrapFunc: anytype) type
 {
-    const IterOutputT = Iter:
-    {
-        const t = @TypeOf(@as(TIter, undefined).next());
-        const info = @typeInfo(t);
-        break :Iter info.Optional.child;
-    };
+    const IterOutputT = IterValueType(TIter);
     const WrappedIterOutputType = @TypeOf(
         wrapFunc(
             @as(IterOutputT, undefined),
@@ -1230,7 +1247,7 @@ const CardResponseWrapper = struct
 
         const response: Card = playerHand.cards.items[r.handCardIndex];
         try response.print(writer, self.context.config);
-        try writer.print(" -- ");
+        try writer.print(" -- ", .{});
         try response.printWithHighlightAt(writer, self.context.config, r.match.response);
     }
 };
@@ -1244,7 +1261,7 @@ fn wrapResponse(a: PossibleResponse, b: *GameLogicContext) CardResponseWrapper
 }
 
 fn wrapResponseIter(context: *GameLogicContext, iter: PossibleResponsesIterator) 
-    WrapIter(PossibleResponsesIterator, GameLogicContext, wrapResponse)
+    WrapIter(PossibleResponsesIterator, *GameLogicContext, wrapResponse)
 {
     return .{
         .context = context,
@@ -1252,7 +1269,7 @@ fn wrapResponseIter(context: *GameLogicContext, iter: PossibleResponsesIterator)
     };
 }
 
-fn wrapCardIndexIterator(context: anytype, iter: anytype)
+fn wrapCardIndexIterator(context: CardInHandContext, iter: anytype)
     WrapIter(@TypeOf(iter), @TypeOf(context), wrapCardIndex)
 {
     return .{
@@ -1266,10 +1283,14 @@ pub fn getAndRealizeAttackerThrowOption(uiContext: *UiContext, context: *GameLog
     while (uiContext.attackersIterator.?.next()) |playerIndex|
     {
         const iter = getCardsAllowedForThrow(context, playerIndex);
-        const printableIter = wrapCardIndexIterator(context, iter);
+        var printableIter = wrapCardIndexIterator(CardInHandContext
+            {
+                .config = context.config,
+                .hand = &context.state.hands.items[playerIndex],
+            }, iter);
         const selectedOption = try collectOptionsFromIteratorAndSelectOne(
             context.allocator,
-            printableIter,
+            &printableIter,
             cout,
             "Skip");
 
@@ -1312,6 +1333,13 @@ pub fn gameLogicLoop(context: *GameLogicContext, uiContext: *UiContext) !bool
         },
         .Respond =>
         {
+            {
+                try cout.print("You have to beat ", .{});
+                const attack = context.state.play.attackCard.?;
+                try attack.print(cout, context.config);
+                try cout.print("\n", .{});
+
+            }
             const responsesIter = try getPossibleResponses(context);
             var wrappedIter = wrapResponseIter(context, responsesIter);
             const selectedResponse = try collectOptionsFromIteratorAndSelectOne(
@@ -1320,10 +1348,10 @@ pub fn gameLogicLoop(context: *GameLogicContext, uiContext: *UiContext) !bool
                 cout,
                 "Take all");
 
-            switch (selectedResponse.response)
+            switch (selectedResponse)
             {
                 .Empty => try takePlayIntoHand(context),
-                .Value => |v| try respond(context, v),
+                .Value => |v| try respond(context, v.response),
             }
         },
         .ThrowIntoPlayOrEnd =>
@@ -1349,11 +1377,13 @@ pub fn gameLogicLoop(context: *GameLogicContext, uiContext: *UiContext) !bool
 
             if (uiContext.attackersIterator == null)
             {
-                uiContext.attackersIterator = .{};
+                uiContext.attackersIterator = .{
+                    .context = context,
+                };
                 uiContext.attackersIterator.?.init();
             }
 
-            const didSomeOption = try getAndRealizeAttackerThrowOption(uiContext, context);
+            const didSomeOption = try getAndRealizeAttackerThrowOption(uiContext, context, cout);
             uiContext.attackersIterator = null;
 
             if (!didSomeOption)
@@ -1398,7 +1428,7 @@ pub fn main() !void
     {
         if (try gameLogicLoop(&context, &uiContext))
         {
-            return 0;
+            return;
         }
     }
 }
