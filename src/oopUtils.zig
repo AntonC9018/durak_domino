@@ -4,27 +4,88 @@ pub fn FatPointer(VTable: type) type
 {
     return struct
     {
-        vtable: VTable,
+        vtable: *const VTable,
         context: *anyopaque,
     };
 }
 
-pub fn fatPointerFromImpl(context: anytype, VTable: type) FatPointer(VTable) 
+pub const VTableImplConfig = struct
+{
+    VTable: type,
+    unimplementedMethodsGetEmptyImplementation: bool = false,
+    wrappedMemberName: ?[]const u8 = null,
+    fallbackError: ?anyerror = null,
+};
+
+pub fn fatPointerFromImpl(context: anytype, comptime config: VTableImplConfig) FatPointer(config.VTable) 
 {
     const storage = struct
     {
         const ContextT = @TypeOf(context.*);
-        const vtable: VTable = vtable:
+        const vtable: config.VTable = vtable:
         {
-            var result: VTable = undefined;
-            const vtableInfo = @typeInfo(VTable);
+            var result: config.VTable = undefined;
+            const vtableInfo = @typeInfo(config.VTable);
 
             for (vtableInfo.Struct.fields) |field|
             {
-                const wrapped = wrappedFunc(@field(ContextT, field.name));
-                // const fieldTypeInfo = @typeInfo(field.type);
-                // const returnType = fieldTypeInfo.Fn.returnType;
-                @field(result, field.name) = wrapped;
+                const funcPtrType = @TypeOf(@field(result, field.name));
+                const funcType = FuncFromFuncPtr(funcPtrType);
+
+                const wrapped = wrapped:
+                {
+                    const hasImpl = @hasDecl(ContextT, field.name);
+                    if (hasImpl)
+                    {
+                        break :wrapped wrappedFunc(@field(ContextT, field.name));
+                    }
+
+                    if (config.wrappedMemberName) |wrappedName|
+                    {
+                        break :wrapped rerouteCallToMemberImpl(.{
+                            .ImplType = ContextT,
+                            .FuncPtrType = funcType,
+                            .memberName = wrappedName,
+                            .methodName = field.name,
+                        });
+                    }
+
+                    if (config.unimplementedMethodsGetEmptyImplementation)
+                    {
+                        break :wrapped emptyImpl(funcType);
+                    }
+                };
+
+                const wrappedAgain = wrappedAgain:
+                {
+                    if (config.fallbackError) |err|
+                    {
+                        const funcInfo = @typeInfo(funcType);
+                        const returnType = funcInfo.Fn.return_type;
+                        const returnTypeInfo = @typeInfo(returnType.?);
+
+                        const TargetErrorSet = TargetErrorSet:
+                        {
+                            switch (returnTypeInfo)
+                            {
+                                .ErrorUnion => |errorUnion|
+                                {
+                                    break :TargetErrorSet errorUnion.error_set;
+                                },
+                                else => break :wrappedAgain wrapped,
+                            }
+                        };
+
+                        break :wrappedAgain rewrapErrorSet(.{
+                            .TargetErrorSet = TargetErrorSet,
+                            .fallbackError = err,
+                        }, wrapped);
+                    }
+
+                    break :wrappedAgain wrapped;
+                };
+
+                @field(result, field.name) = wrappedAgain;
             }
 
             break :vtable result;
@@ -85,3 +146,180 @@ fn wrappedFunc(comptime func: anytype) WrappedFuncType(@TypeOf(func))
     return @ptrCast(&func);
 }
 
+fn FuncFromFuncPtr(FuncPtr: type) type
+{
+    const typeInfo = @typeInfo(FuncPtr);
+    const ptrInfo = typeInfo.Pointer;
+    return ptrInfo.child;
+}
+
+fn emptyImpl(comptime Func: type) WrappedFuncType(Func)
+{
+    const typeInfo = @typeInfo(Func);
+    const funcInfo = typeInfo.Fn;
+    switch (funcInfo.params.len)
+    {
+        1 =>
+        {
+            return &struct
+            {
+                pub fn f(context: *anyopaque) funcInfo.return_type
+                {
+                    _ = context;
+                }
+            }.f;
+        },
+        2 =>
+        {
+            return &struct
+            {
+                pub fn f(context: *anyopaque, params: funcInfo.params[0]) funcInfo.return_type
+                {
+                    _ = context;
+                    _ = params;
+                }
+            }.f;
+        },
+        else => std.debug.panic("Unimplemented"),
+    }
+}
+
+const CallToMemberImplParams = struct
+{
+    ImplType: type,
+    FuncType: type,
+    memberName: []const u8,
+    methodName: []const u8,
+};
+
+fn rerouteCallToMemberImpl(comptime params: CallToMemberImplParams) WrappedFuncType(params.FuncType)
+{
+    const typeInfo = @typeInfo(params.FuncType);
+    const funcInfo = typeInfo.Fn;
+    switch (funcInfo.params.len)
+    {
+        1 =>
+        {
+            return @ptrCast(&struct
+            {
+                pub fn f(context: *params.ImplType) funcInfo.return_type
+                {
+                    const mem = @field(context, params.memberName);
+                    return @call(mem, params.methodName, .{ mem });
+                }
+            }.f);
+        },
+        2 =>
+        {
+            return @ptrCast(&struct
+            {
+                pub fn f(context: *params.ImplType, p: funcInfo.params[0]) funcInfo.return_type
+                {
+                    const mem = @field(context, params.memberName);
+                    return @call(mem, params.methodName, .{ mem, p });
+                }
+            }.f);
+        },
+        else => std.debug.panic("Unimplemented"),
+    }
+}
+
+const RewrapErrorSetParams = struct
+{
+    TargetErrorSet: type,
+    fallbackError: anyerror,
+
+    fn availableErrors(self: RewrapErrorSetParams) []const std.builtin.Type.Error
+    {
+        const i = @typeInfo(self.TargetErrorSet);
+        return i.ErrorSet.?;
+    }
+};
+
+fn FuncTypeWithError(Func: type, NewErrors: type) type
+{
+    var funcInfo = @typeInfo(Func);
+    const ReturnType = funcInfo.Fn.return_type;
+    
+    const NewReturnType = newReturnType:
+    {
+        if (ReturnType == void)
+        {
+            break :newReturnType NewErrors!void;
+        }
+        const returnTypeInfo = @typeInfo(ReturnType);
+        switch (returnTypeInfo)
+        {
+            .ErrorUnion => |eu|
+            {
+                var i = eu;
+                i.error_set = NewErrors;
+                break :newReturnType @Type(.{
+                    .ErrorUnion = i,
+                });
+            },
+            else => unreachable,
+            // else => |t, k|
+            // {
+            // },
+        }
+    };
+    funcInfo.Fn.return_type = NewReturnType;
+    return @Type(funcInfo);
+}
+
+fn rewrapErrorSet(comptime params: RewrapErrorSetParams, func: anytype) 
+    FuncTypeWithError(@TypeOf(func), params.TargetErrorSet)
+{
+    const funcType = FuncTypeWithError(@TypeOf(func), params.TargetErrorSet);
+    const funcInfo = @typeInfo(funcType).Fn;
+
+    const oldFuncType = FuncFromFuncPtr(@TypeOf(func));
+    const oldFuncTypeInfo = @typeInfo(oldFuncType);
+    const oldReturnType = oldFuncTypeInfo.Fn.return_type;
+
+    const remapError = struct
+    {
+        fn f(val: oldReturnType) funcInfo.return_type
+        {
+            return val catch |err|
+            {
+                inline for (params.availableErrors()) |e|
+                {
+                    if (@field(params.TargetErrorSet, e.name) == err)
+                    {
+                        return err;
+                    }
+                }
+                return params.fallbackError;
+            };
+        }
+    }.f;
+
+    switch (funcInfo.params.len)
+    {
+        1 =>
+        {
+            return @ptrCast(&struct
+            {
+                pub fn f(context: *anyopaque) funcInfo.return_type
+                {
+                    const result = func(context);
+                    return remapError(result);
+                }
+            }.f);
+        },
+        2 =>
+        {
+            return @ptrCast(&struct
+            {
+                pub fn f(context: *anyopaque, p: funcInfo.params[0]) funcInfo.return_type
+                {
+                    const result = func(context, p);
+                    return remapError(result);
+                }
+            }.f);
+        },
+        else => std.debug.panic("Unimplemented"),
+    }
+}

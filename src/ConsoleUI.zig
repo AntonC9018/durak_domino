@@ -1,77 +1,160 @@
 const core = @import("core.zig");
-const std = @import("std.zig");
+const std = @import("std");
 const UIObject = @import("UIObject.zig");
+const EventQueue = @import("EventQueue.zig");
 
 context: *core.GameLogicContext,
-attackersIterator: ?core.PossibleAttackersIterator,
-cout: @TypeOf(std.cout.writer()) = std.cout.writer(),
+cout: @TypeOf(std.io.getStdOut().writer()),
 
 const Self = @This();
 
-pub fn setResponses(self: Self, params: UIObject.SetResponsesParameters) bool
+pub fn setOptions(self: *Self, params: UIObject.SetOptionsParameters) !void
 {
-}
-
-pub fn passTurn(self: Self, params: UIObject.PassTurnParameters) bool
-{
-    printPlayersHand(self.context, params.players.attacker, self.cout)
-        catch return false;
-    self.cout.print("Player {} selects the card to attack with: \n", .{ self.context.state.attackerIndex() })
-        catch return false;
-    return true;
-}
-
-pub fn play(self: Self, params: UIObject.PlayParameters) bool
-{
-}
-
-pub fn redraw(self: Self, params: UIObject.RedrawParameters) bool
-{
-}
-
-pub fn respond(self: Self, params: UIObject.RespondParameters) bool
-{
-}
-
-pub fn throwIntoPlay(self: Self, params: UIObject.ThrowIntoPlayParameters) bool
-{
-}
-
-pub fn endPlay(self: Self, params: UIObject.EndPlayParameters) bool
-{
-}
-
-pub fn gameOver(self: Self, params: UIObject.GameOverParameters) bool
-{
-}
-
-pub fn moveIntoDrawPile(self: Self, params: UIObject.MoveIntoDrawPileParameters) bool
-{
-}
-
-pub fn resetPlay(self: Self, params: UIObject.ResetPlayParameters) bool
-{
-}
-
-fn showGameOver(context: *core.GameLogicContext, cout: anytype) !bool
-{
-    const endState = core.getCompletionStatus(context.state);
-    switch (endState)
+    switch (params.playOption)
     {
-        .Incomplete =>
+        .Defense =>
         {
-            return false;
+            try printPlayersHand(self.context, self.context.state.defenderIndex(), self.cout);
+            try self.cout.print("Player {} has to beat ", .{ self.context.state.defenderIndex() });
+            const attack = self.context.state.play.attackCard.?;
+            try attack.print(self.cout, self.context.config);
+            try self.cout.print("\n", .{});
+
+            const responsesIter = core.getPossibleDefenses(self.context) catch unreachable;
+            var wrappedIter = wrapResponseIter(self.context, responsesIter);
+            const selectedResponse = try collectOptionsFromIteratorAndSelectOne(
+                self.context.allocator,
+                &wrappedIter,
+                self.cout,
+                "Take all");
+
+            const response: EventQueue.ResponseEvent = response:
+            {
+                switch (selectedResponse)
+                {
+                    .Empty =>
+                    {
+                        break :response .Take;
+                    },
+                    .Value => |v|
+                    {
+                        break :response .{
+                            .Defense = v.response,
+                        };
+                    },
+                }
+            };
+
+            try self.context.eventQueue.addEvent(.{
+                .Response = response,
+            });
         },
-        .Lose => |i|
+        .InitialAttack => 
         {
-            try cout.print("Player {} loses.\n", .{ i });
+            const players = self.context.state.turnIndices;
+            try printPlayersHand(self.context, players.attacker, self.cout);
+            try self.cout.print("Player {} attacks player {}", .{ players.attacker, players.defender });
+
+            const hand = core.getAttackerHand(self.context.state);
+            const cardsInHandContext = CardInHandContext
+            {
+                .hand = hand,
+                .config = self.context.config,
+            };
+            var wrappedIter = wrapCardIndexIterator(
+                cardsInHandContext,
+                CardsInHandIter.create(cardsInHandContext));
+            const selectedAttackIndex = try collectOptionsFromIteratorAndSelectOne(
+                self.context.allocator,
+                &wrappedIter,
+                self.cout,
+                null);
+
+            try self.context.eventQueue.addEvent(.{
+                .Play = .{
+                    .handCardIndex = selectedAttackIndex,
+                },
+            });
         },
-        .Tie =>
+        .ThrowAttack =>
         {
-            try cout.print("Tie.\n", .{});
+            var attackersIterator = core.PossibleAttackersIterator.create(self.context);
+            try getAndRealizeAttackerThrowOption(self, &attackersIterator);
+        },
+        .None =>
+        {
+            unreachable;
         },
     }
-    return true;
+}
+
+pub fn passTurn(self: *Self, params: UIObject.PassTurnParameters) !void
+{
+    try printPlayersHand(self.context, params.players.attacker, self.cout);
+    try self.cout.print("Player {} selects the card to attack with: \n", .{ self.context.state.attackerIndex() });
+}
+
+pub fn play(self: *Self, params: UIObject.PlayParameters) !void
+{
+    try self.cout.print("Player {} attacks with card {}\n", .{
+        params.playerIndex,
+        params.card,
+    });
+}
+
+pub fn redraw(self: *Self, params: UIObject.RedrawParameters) !void
+{
+    for (params.draws.items) |draw|
+    {
+        try self.cout.print("Player {} draws {}\n", .{
+            draw.playerIndex,
+            draw.addedCards,
+        });
+    }
+}
+
+pub fn respond(self: *Self, params: UIObject.RespondParameters) !void
+{
+    try self.cout.print("Player {} responds with {}\n", .{
+        params.playerIndex,
+        params.response,
+    });
+}
+
+pub fn throwIntoPlay(self: *Self, params: UIObject.ThrowIntoPlayParameters) !void
+{
+    try self.cout.print("Player {} throw {} into play\n", .{
+        params.playerIndex,
+        params.card,
+    });
+}
+
+pub fn endPlay(self: *Self, params: UIObject.EndPlayParameters) !void
+{
+    try self.cout.print("Play ends\n", .{});
+    _ = params;
+}
+
+pub fn gameOver(self: *Self, params: UIObject.GameOverParameters) !void
+{
+    try self.cout.print("Game over\n", .{});
+    switch (params.result)
+    {
+        .Incomplete => unreachable,
+        .Lose => |l| try self.cout.print("Player {} loses\n", .{ l }),
+        .Tie => try self.cout.print("Tie\n", .{}),
+    }
+}
+
+pub fn moveIntoDrawPile(self: *Self, params: UIObject.MoveIntoDrawPileParameters) !void
+{
+    try self.cout.print("{} have been moved to the draw pile", .{ params.cards });
+}
+
+pub fn resetPlay(self: *Self, params: UIObject.ResetPlayParameters) !void
+{
+    _ = params;
+    try self.cout.print("Play has been reset", .{});
 }
 
 fn IterValueType(IterT: type) type
@@ -262,6 +345,22 @@ fn SliceIter(T: type) type
     };
 }
 
+fn ItemType(Slice: type) type
+{
+    const info = @typeInfo(Slice);
+    return info.Pointer.child;
+}
+
+fn iterateSlice(slice: anytype) SliceIter(ItemType(@TypeOf(slice)))
+{
+    return .{
+        .ptr = slice.ptr,
+        .rangeIter = .{
+            .count = slice.len,
+        },
+    };
+}
+
 const CardInHandContext = struct
 {
     hand: *const core.Hand,
@@ -288,11 +387,11 @@ const CardInHand = struct
     }
 };
 
-pub fn wrapCardIndex(value: usize, context: CardInHandContext) CardInHand
+pub fn wrapCardIndex(index: usize, context: CardInHandContext) CardInHand
 {
     return .{
         .context = context,
-        .cardIndex = value,
+        .cardIndex = index,
     };
 }
 
@@ -301,10 +400,13 @@ const CardsInHandIter = struct
     rangeIter: RangeIter = undefined,
     context: CardInHandContext,
 
-    pub fn init(self: *CardsInHandIter) void
+    pub fn create(context: CardInHandContext) CardsInHandIter
     {
-        self.rangeIter = .{
-            .count = self.context.hand.cards.items.len,
+        return .{
+            .context = context,
+            .rangeIter = .{
+                .count = context.hand.cards.items.len,
+            },
         };
     }
 
@@ -367,7 +469,7 @@ fn WrapIter(
 
 const CardResponseWrapper = struct
 {
-    response: core.PossibleResponse,
+    response: core.Defense,
     context: *core.GameLogicContext,
 
     pub fn format(
@@ -377,7 +479,7 @@ const CardResponseWrapper = struct
         writer: anytype) !void
     {
         const r = self.response;
-        const playerHand = &self.context.state.hands.items[self.context.state.defenderIndex()];
+        const playerHand = core.getDefenderHand();
 
         const response: core.Card = playerHand.cards.items[r.handCardIndex];
         try response.print(writer, self.context.config);
@@ -386,7 +488,7 @@ const CardResponseWrapper = struct
     }
 };
 
-fn wrapResponse(a: core.PossibleResponse, b: *core.GameLogicContext) CardResponseWrapper
+fn wrapResponse(a: core.Defense, b: *core.GameLogicContext) CardResponseWrapper
 {
     return .{
         .response = a,
@@ -412,7 +514,7 @@ fn wrapCardIndexIterator(context: CardInHandContext, iter: anytype)
     };
 }
 
-pub fn printPlayersHand(
+fn printPlayersHand(
     context: *core.GameLogicContext,
     playerIndex: u8,
     cout: anytype) !void
@@ -425,7 +527,7 @@ pub fn printPlayersHand(
     try cout.print("\n", .{});
 }
 
-pub fn printHand(
+fn printHand(
     context: CardInHandContext,
     cout: anytype) !void
 {
@@ -439,36 +541,35 @@ pub fn printHand(
     }
 }
 
-// TODO: This will need a controller abstraction.
-pub fn getAndRealizeAttackerThrowOption(uiContext: *Self, context: *core.GameLogicContext, cout: anytype) !bool
+// This needs to be abstracted in some way, because this
+// logic will be shared with the graphical module.
+pub fn getAndRealizeAttackerThrowOption(self: *Self, iter: *core.AllPlayersThrowAttackIterator) !bool
 {
-    while (uiContext.attackersIterator.?.next()) |playerIndex|
+    while (iter.next()) |playerIndex|
     {
         const cardHandContext = CardInHandContext
         {
-            .config = context.config,
-            .hand = &context.state.hands.items[playerIndex],
+            .config = self.context.config,
+            .hand = &self.context.state.hands.items[playerIndex],
         };
-        try printPlayersHand(context, playerIndex, cout);
-        try cout.print("Player {} selects a card to throw in:\n", .{ playerIndex });
+        try printPlayersHand(self.context, playerIndex, self.cout);
+        try self.cout.print("Player {} selects a card to throw in:\n", .{ playerIndex });
 
-        const iter = core.getCardsAllowedForThrow(context, playerIndex);
-        var printableIter = wrapCardIndexIterator(cardHandContext, iter);
+        var printableIter = wrapCardIndexIterator(cardHandContext, self.attackersIterator);
         const selectedOption = try collectOptionsFromIteratorAndSelectOne(
-            context.allocator,
+            self.context.allocator,
             &printableIter,
-            cout,
+            self.cout,
             "Skip");
 
-        switch (selectedOption)
-        {
-            .Empty => continue,
-            .Value => |v| 
+        try self.context.eventQueue.addEvent(.{
+            .Throw = switch (selectedOption)
             {
-                try core.throwIntoPlay(context, playerIndex, v.cardIndex);
-                return true;
-            }
-        }
+                .Value => |v| break .{ .Throw = v },
+                .Empty => continue,
+            },
+        });
+        return true;
     }
     return false;
 }

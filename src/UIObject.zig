@@ -3,74 +3,78 @@ obj: Object,
 const core = @import("core.zig");
 const std = @import("std");
 const oopUtils = @import("oopUtils.zig");
+const EventQueue = @import("EventQueue.zig");
 
 pub const Object = oopUtils.FatPointer(VTable);
 const Self = @This();
 
-pub fn setResponses(self: Self, params: SetResponsesParameters) bool
+pub const fallbackError = error.UIError;
+pub const ErrorSet = error{Error} || std.mem.Allocator.Error;
+
+pub fn setOptions(self: Self, params: SetOptionsParameters) ErrorSet!void
 {
     const c: *Context = @ptrCast(self.obj.context);
-    const f = self.obj.vtable.setResponses;
+    const f = self.obj.vtable.setOptions;
     return f(c, params);
 }
 
-pub fn passTurn(self: Self, params: PassTurnParameters) bool
+pub fn passTurn(self: Self, params: PassTurnParameters) ErrorSet!void
 {
     const c: *Context = @ptrCast(self.obj.context);
     const f = self.obj.vtable.passTurn;
     return f(c, params);
 }
 
-pub fn play(self: Self, params: PlayParameters) bool
+pub fn play(self: Self, params: PlayParameters) ErrorSet!void
 {
     const c: *Context = @ptrCast(self.obj.context);
     const f = self.obj.vtable.play;
     return f(c, params);
 }
 
-pub fn redraw(self: Self, params: RedrawParameters) bool
+pub fn redraw(self: Self, params: RedrawParameters) ErrorSet!void
 {
     const c: *Context = @ptrCast(self.obj.context);
     const f = self.obj.vtable.redraw;
     return f(c, params);
 }
 
-pub fn respond(self: Self, params: RespondParameters) bool
+pub fn respond(self: Self, params: RespondParameters) ErrorSet!void
 {
     const c: *Context = @ptrCast(self.obj.context);
     const f = self.obj.vtable.respond;
     return f(c, params);
 }
 
-pub fn throwIntoPlay(self: Self, params: ThrowIntoPlayParameters) bool
+pub fn throwIntoPlay(self: Self, params: ThrowIntoPlayParameters) ErrorSet!void
 {
     const c: *Context = @ptrCast(self.obj.context);
     const f = self.obj.vtable.throwIntoPlay;
     return f(c, params);
 }
 
-pub fn endPlay(self: Self, params: EndPlayParameters) bool
+pub fn endPlay(self: Self, params: EndPlayParameters) ErrorSet!void
 {
     const c: *Context = @ptrCast(self.obj.context);
     const f = self.obj.vtable.endPlay;
     return f(c, params);
 }
 
-pub fn gameOver(self: Self, params: GameOverParameters) bool
+pub fn gameOver(self: Self, params: GameOverParameters) ErrorSet!void
 {
     const c: *Context = @ptrCast(self.obj.context);
     const f = self.obj.vtable.gameOver;
     return f(c, params);
 }
 
-pub fn moveIntoDrawPile(self: Self, params: MoveIntoDrawPileParameters) bool
+pub fn moveIntoDrawPile(self: Self, params: MoveIntoDrawPileParameters) ErrorSet!void
 {
     const c: *Context = @ptrCast(self.obj.context);
     const f = self.obj.vtable.moveIntoDrawPile;
     return f(c, params);
 }
 
-pub fn resetPlay(self: Self, params: ResetPlayParameters) bool
+pub fn resetPlay(self: Self, params: ResetPlayParameters) ErrorSet!void
 {
     const c: *Context = @ptrCast(self.obj.context);
     const f = self.obj.vtable.resetPlay;
@@ -79,9 +83,9 @@ pub fn resetPlay(self: Self, params: ResetPlayParameters) bool
 
 const GameLogicContext = core.GameLogicContext;
 
-pub const SetResponsesParameters = struct
+pub const SetOptionsParameters = struct
 {
-    iter: core.PossibleResponsesIterator,
+    playOption: core.PlayOption,
 };
 
 pub const PassTurnParameters = struct
@@ -111,7 +115,8 @@ pub const RedrawParameters = struct
 
 pub const RespondParameters = struct
 {
-    response: core.PossibleResponse,
+    playerIndex: usize,
+    response: core.Defense,
 };
 
 pub const ThrowIntoPlayParameters = struct
@@ -140,37 +145,40 @@ pub const ResetPlayParameters = struct
 
 pub const SelectResponseParameters = struct
 {
-    callback: ControllerCallback(core.PossibleResponse),
+    controller: *EventQueue,
 };
 
 pub const Context = anyopaque;
 
 pub const VTable = struct
 {
-    setResponses: Func(SetResponsesParameters),
-    passTurn: Func(PassTurnParameters),
+    setOptions: Func(SetOptionsParameters),
+
     play: Func(PlayParameters),
     redraw: Func(RedrawParameters),
     respond: Func(RespondParameters),
     throwIntoPlay: Func(ThrowIntoPlayParameters),
     endPlay: Func(EndPlayParameters),
-    gameOver: Func(GameOverParameters),
+
+    passTurn: Func(PassTurnParameters),
     moveIntoDrawPile: Func(MoveIntoDrawPileParameters),
+
+    gameOver: Func(GameOverParameters),
     resetPlay: Func(ResetPlayParameters),
 
     fn Func(Params: type) type
     {
-        return *const fn(context: *Context, value: Params) bool;
+        return *const fn(context: *Context, value: Params) ErrorSet!void;
     }
 };
 
-pub fn ControllerCallback(Value: type) type
+pub fn create(context: anytype) Self
 {
-    const Func = VTable.Func(Value);
-    return oopUtils.Delegate(Func);
-}
-
-pub fn create(context: anytype) Object
-{
-    return oopUtils.fatPointerFromImpl(context);
+    const result = oopUtils.fatPointerFromImpl(context, .{
+        .VTable = VTable,
+        .fallbackError = fallbackError,
+    });
+    return .{
+        .obj = result,
+    };
 }
