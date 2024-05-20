@@ -14,11 +14,13 @@ pub fn setOptions(self: *Self, params: UIObject.SetOptionsParameters) !void
     {
         .Defense =>
         {
-            try printPlayersHand(self.context, self.context.state.defenderIndex(), self.cout);
-            try self.cout.print("Player {} has to beat ", .{ self.context.state.defenderIndex() });
+            const playerIndex = self.context.state.defenderIndex();
             const attack = self.context.state.play.attackCard.?;
-            try attack.print(self.cout, self.context.config);
-            try self.cout.print("\n", .{});
+            try printPlayersHand(self.context, playerIndex, self.cout);
+            try self.cout.print("Player {} has to beat {}\n", .{
+                playerIndex,
+                attack.asPrintable(self.context.config),
+            });
 
             const responsesIter = core.getPossibleDefenses(self.context) catch unreachable;
             var wrappedIter = wrapResponseIter(self.context, responsesIter);
@@ -53,18 +55,16 @@ pub fn setOptions(self: *Self, params: UIObject.SetOptionsParameters) !void
         {
             const players = self.context.state.turnIndices;
             try printPlayersHand(self.context, players.attacker, self.cout);
-            try self.cout.print("Player {} attacks player {}", .{ players.attacker, players.defender });
+            try self.cout.print("Player {} attacks player {}\n", .{ players.attacker, players.defender });
 
-            const hand = core.getAttackerHand(self.context.state);
-            const cardsInHandContext = CardInHandContext
-            {
-                .hand = hand,
-                .config = self.context.config,
-            };
+            const cardsInHand = core.getAttackerHand(self.context.state).cards.items;
+            const cardsInHandContext = PrintableCardsSlice.fromCards(self.context, cardsInHand);
             var wrappedIter = wrapCardIndexIterator(
                 cardsInHandContext,
-                CardsInHandIter.create(cardsInHandContext));
-            const selectedAttackIndex = try collectOptionsFromIteratorAndSelectOne(
+                RangeIter.create(.{
+                    .count = cardsInHand.len,
+                }));
+            const selectedAttack = try collectOptionsFromIteratorAndSelectOne(
                 self.context.allocator,
                 &wrappedIter,
                 self.cout,
@@ -72,14 +72,14 @@ pub fn setOptions(self: *Self, params: UIObject.SetOptionsParameters) !void
 
             try self.context.eventQueue.addEvent(.{
                 .Play = .{
-                    .handCardIndex = selectedAttackIndex,
+                    .handCardIndex = selectedAttack.cardIndex,
                 },
             });
         },
         .ThrowAttack =>
         {
             var attackersIterator = core.PossibleAttackersIterator.create(self.context);
-            try getAndRealizeAttackerThrowOption(self, &attackersIterator);
+            _ = try getAndRealizeAttackerThrowOption(self, &attackersIterator);
         },
         .None =>
         {
@@ -90,15 +90,15 @@ pub fn setOptions(self: *Self, params: UIObject.SetOptionsParameters) !void
 
 pub fn passTurn(self: *Self, params: UIObject.PassTurnParameters) !void
 {
-    try printPlayersHand(self.context, params.players.attacker, self.cout);
-    try self.cout.print("Player {} selects the card to attack with: \n", .{ self.context.state.attackerIndex() });
+    _ = self;
+    _ = params;
 }
 
 pub fn play(self: *Self, params: UIObject.PlayParameters) !void
 {
     try self.cout.print("Player {} attacks with card {}\n", .{
         params.playerIndex,
-        params.card,
+        params.card.asPrintable(self.context.config),
     });
 }
 
@@ -108,7 +108,7 @@ pub fn redraw(self: *Self, params: UIObject.RedrawParameters) !void
     {
         try self.cout.print("Player {} draws {}\n", .{
             draw.playerIndex,
-            draw.addedCards,
+            PrintableCardsSlice.fromCards(self.context, draw.addedCards),
         });
     }
 }
@@ -117,7 +117,7 @@ pub fn respond(self: *Self, params: UIObject.RespondParameters) !void
 {
     try self.cout.print("Player {} responds with {}\n", .{
         params.playerIndex,
-        params.response,
+        params.card.asPrintable(self.context.config),
     });
 }
 
@@ -125,7 +125,7 @@ pub fn throwIntoPlay(self: *Self, params: UIObject.ThrowIntoPlayParameters) !voi
 {
     try self.cout.print("Player {} throw {} into play\n", .{
         params.playerIndex,
-        params.card,
+        params.card.asPrintable(self.context.config),
     });
 }
 
@@ -148,13 +148,15 @@ pub fn gameOver(self: *Self, params: UIObject.GameOverParameters) !void
 
 pub fn moveIntoDrawPile(self: *Self, params: UIObject.MoveIntoDrawPileParameters) !void
 {
-    try self.cout.print("{} have been moved to the draw pile", .{ params.cards });
+    try self.cout.print("{} have been moved to the draw pile\n", .{ 
+        PrintableCardsSlice.fromCards(self.context, params.cards),
+    });
 }
 
 pub fn resetPlay(self: *Self, params: UIObject.ResetPlayParameters) !void
 {
     _ = params;
-    try self.cout.print("Play has been reset", .{});
+    try self.cout.print("Play has been reset\n", .{});
 }
 
 fn IterValueType(IterT: type) type
@@ -240,9 +242,9 @@ fn collectOptionsFromIteratorAndSelectOne(
             optionIndex += 1;
         }
 
-        for (list.items) |n|
+        for (list.items) |item|
         {
-            try cout.print("{}: {}\n", .{ optionIndex, n }); 
+            try cout.print("{}: {}\n", .{ optionIndex, item }); 
             optionIndex += 1;
         }
 
@@ -309,11 +311,23 @@ fn collectOptionsFromIteratorAndSelectOne(
 const RangeIter = struct
 {
     currentIndex: usize = 0,
-    count: usize,
+    endExclusive: usize,
+
+    pub fn create(params: struct
+        {
+            start: usize = 0,
+            count: usize,
+        }) RangeIter
+    {
+        return .{
+            .currentIndex = params.start,
+            .endExclusive = params.start + params.count,
+        };
+    }
 
     pub fn next(self: *RangeIter) ?usize
     {
-        if (self.currentIndex >= self.count)
+        if (self.currentIndex >= self.endExclusive)
         {
             return null;
         }
@@ -356,25 +370,57 @@ fn iterateSlice(slice: anytype) SliceIter(ItemType(@TypeOf(slice)))
     return .{
         .ptr = slice.ptr,
         .rangeIter = .{
-            .count = slice.len,
+            .endExclusive = slice.len,
         },
     };
 }
 
-const CardInHandContext = struct
+const PrintableCardsSlice = struct
 {
-    hand: *const core.Hand,
+    cards: []const core.Card,
     config: *const core.Config,
+
+    pub fn fromPlayerIndex(context: *core.GameLogicContext, playerIndex: u8) PrintableCardsSlice
+    {
+        return .{
+            .cards = context.state.hands.items[playerIndex].cards.items,
+            .config = context.config,
+        };
+    }
+
+    pub fn fromCards(context: *core.GameLogicContext, cards: []const core.Card) PrintableCardsSlice
+    {
+        return .{
+            .cards = cards,
+            .config = context.config,
+        };
+    }
+
+    pub fn format(
+        self: PrintableCardsSlice,
+        comptime _: []const u8,
+        _: std.fmt.FormatOptions,
+        writer: anytype) !void
+    {
+        for (0 .., self.cards) |i, c|
+        {
+            if (i != 0)
+            {
+                try writer.print(" | ", .{});
+            }
+            try c.asPrintable(self.config).print(writer);
+        }
+    }
 };
 
 const CardInHand = struct
 {
-    context: CardInHandContext,
+    context: PrintableCardsSlice,
     cardIndex: usize,
 
     pub fn card(self: *const CardInHand) core.Card
     {
-        return self.context.hand.cards.items[self.cardIndex];
+        return self.context.cards[self.cardIndex];
     }
 
     pub fn format(
@@ -383,11 +429,11 @@ const CardInHand = struct
         _: std.fmt.FormatOptions,
         writer: anytype) !void
     {
-        try self.card().print(writer, self.context.config);
+        try self.card().asPrintable(self.context.config).print(writer);
     }
 };
 
-pub fn wrapCardIndex(index: usize, context: CardInHandContext) CardInHand
+pub fn wrapCardIndex(index: usize, context: PrintableCardsSlice) CardInHand
 {
     return .{
         .context = context,
@@ -398,14 +444,14 @@ pub fn wrapCardIndex(index: usize, context: CardInHandContext) CardInHand
 const CardsInHandIter = struct
 {
     rangeIter: RangeIter = undefined,
-    context: CardInHandContext,
+    context: PrintableCardsSlice,
 
-    pub fn create(context: CardInHandContext) CardsInHandIter
+    pub fn create(context: PrintableCardsSlice) CardsInHandIter
     {
         return .{
             .context = context,
             .rangeIter = .{
-                .count = context.hand.cards.items.len,
+                .count = context.cards.len,
             },
         };
     }
@@ -473,18 +519,18 @@ const CardResponseWrapper = struct
     context: *core.GameLogicContext,
 
     pub fn format(
-        self: *const CardResponseWrapper,
+        self: CardResponseWrapper,
         comptime _: []const u8,
         _: std.fmt.FormatOptions,
         writer: anytype) !void
     {
         const r = self.response;
-        const playerHand = core.getDefenderHand();
+        const playerHand = core.getDefenderHand(self.context.state);
 
         const response: core.Card = playerHand.cards.items[r.handCardIndex];
-        try response.print(writer, self.context.config);
-        try writer.print(" -- ", .{});
-        try response.printWithHighlightAt(writer, self.context.config, r.match.response);
+        try writer.print("{}", .{
+            response.asPrintableWithHighlight(self.context.config, r.match.response),
+        });
     }
 };
 
@@ -505,7 +551,7 @@ fn wrapResponseIter(context: *core.GameLogicContext, iter: core.PossibleResponse
     };
 }
 
-fn wrapCardIndexIterator(context: CardInHandContext, iter: anytype)
+fn wrapCardIndexIterator(context: PrintableCardsSlice, iter: anytype)
     WrapIter(@TypeOf(iter), @TypeOf(context), wrapCardIndex)
 {
     return .{
@@ -519,57 +565,47 @@ fn printPlayersHand(
     playerIndex: u8,
     cout: anytype) !void
 {
-    try cout.print("Player {}'s hand: ", .{ playerIndex });
-    try printHand(.{
-        .hand = &context.state.hands.items[playerIndex],
-        .config = context.config,
-    }, cout);
-    try cout.print("\n", .{});
-}
-
-fn printHand(
-    context: CardInHandContext,
-    cout: anytype) !void
-{
-    for (0 .., context.hand.cards.items) |i, c|
-    {
-        if (i != 0)
-        {
-            try cout.print(" | ", .{});
-        }
-        try c.print(cout, context.config);
-    }
+    const printableHand = PrintableCardsSlice.fromPlayerIndex(context, playerIndex);
+    try cout.print("Player {}'s hand: {any}\n", .{ playerIndex, printableHand });
 }
 
 // This needs to be abstracted in some way, because this
 // logic will be shared with the graphical module.
-pub fn getAndRealizeAttackerThrowOption(self: *Self, iter: *core.AllPlayersThrowAttackIterator) !bool
+pub fn getAndRealizeAttackerThrowOption(self: *Self, iter: *core.PossibleAttackersIterator) !bool
 {
     while (iter.next()) |playerIndex|
     {
-        const cardHandContext = CardInHandContext
-        {
-            .config = self.context.config,
-            .hand = &self.context.state.hands.items[playerIndex],
-        };
         try printPlayersHand(self.context, playerIndex, self.cout);
         try self.cout.print("Player {} selects a card to throw in:\n", .{ playerIndex });
 
-        var printableIter = wrapCardIndexIterator(cardHandContext, self.attackersIterator);
+        const cardHandContext = PrintableCardsSlice.fromPlayerIndex(self.context, playerIndex);
+        const cardIter = core.ThrowAttackCardIndexIterator.fromPlayerIndex(self.context, playerIndex);
+        var printableIter = wrapCardIndexIterator(cardHandContext, cardIter);
         const selectedOption = try collectOptionsFromIteratorAndSelectOne(
             self.context.allocator,
             &printableIter,
             self.cout,
             "Skip");
 
-        try self.context.eventQueue.addEvent(.{
-            .Throw = switch (selectedOption)
+        switch (selectedOption)
+        {
+            .Empty => {},
+            .Value => |v| 
             {
-                .Value => |v| break .{ .Throw = v },
-                .Empty => continue,
+                try self.context.eventQueue.addEvent(.{
+                    .Throw = .{
+                        .Throw = .{
+                            .handCardIndex = v.cardIndex,
+                            .attackerIndex = playerIndex,
+                        },
+                    },
+                });
+                return true;
             },
-        });
-        return true;
+        }
     }
+    try self.context.eventQueue.addEvent(.{
+        .Throw = .Skip,
+    });
     return false;
 }

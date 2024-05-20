@@ -9,7 +9,7 @@ pub const Object = oopUtils.FatPointer(VTable);
 const Self = @This();
 
 pub const fallbackError = error.UIError;
-pub const ErrorSet = error{Error} || std.mem.Allocator.Error;
+pub const ErrorSet = error{UIError} || std.mem.Allocator.Error;
 
 pub fn setOptions(self: Self, params: SetOptionsParameters) ErrorSet!void
 {
@@ -67,6 +67,7 @@ pub fn gameOver(self: Self, params: GameOverParameters) ErrorSet!void
     return f(c, params);
 }
 
+// TODO: Rename "Discard"
 pub fn moveIntoDrawPile(self: Self, params: MoveIntoDrawPileParameters) ErrorSet!void
 {
     const c: *Context = @ptrCast(self.obj.context);
@@ -117,6 +118,7 @@ pub const RespondParameters = struct
 {
     playerIndex: usize,
     response: core.Defense,
+    card: core.Card,
 };
 
 pub const ThrowIntoPlayParameters = struct

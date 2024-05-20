@@ -3,7 +3,6 @@ const std = @import("std");
 const UIObject = @import("UIObject.zig");
 const ConsoleUI = @import("ConsoleUI.zig");
 const EventQueue = @import("EventQueue.zig");
-    
 
 pub fn main() !void
 {
