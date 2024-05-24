@@ -48,3 +48,8 @@ pub fn main() !void
         }
     }
 }
+
+test
+{
+    _ = core;
+}

@@ -2,6 +2,7 @@ const core = @import("core.zig");
 const std = @import("std");
 const UIObject = @import("UIObject.zig");
 const EventQueue = @import("EventQueue.zig");
+const utils = @import("utils.zig");
 
 context: *core.GameLogicContext,
 cout: @TypeOf(std.io.getStdOut().writer()),
@@ -12,45 +13,6 @@ pub fn setOptions(self: *Self, params: UIObject.SetOptionsParameters) !void
 {
     switch (params.playOption)
     {
-        .Defense =>
-        {
-            const playerIndex = self.context.state.defenderIndex();
-            const attack = self.context.state.play.attackCard.?;
-            try printPlayersHand(self.context, playerIndex, self.cout);
-            try self.cout.print("Player {} has to beat {}\n", .{
-                playerIndex,
-                attack.asPrintable(self.context.config),
-            });
-
-            const responsesIter = core.getPossibleDefenses(self.context) catch unreachable;
-            var wrappedIter = wrapResponseIter(self.context, responsesIter);
-            const selectedResponse = try collectOptionsFromIteratorAndSelectOne(
-                self.context.allocator,
-                &wrappedIter,
-                self.cout,
-                "Take all");
-
-            const response: EventQueue.ResponseEvent = response:
-            {
-                switch (selectedResponse)
-                {
-                    .Empty =>
-                    {
-                        break :response .Take;
-                    },
-                    .Value => |v|
-                    {
-                        break :response .{
-                            .Defense = v.response,
-                        };
-                    },
-                }
-            };
-
-            try self.context.eventQueue.addEvent(.{
-                .Response = response,
-            });
-        },
         .InitialAttack => 
         {
             const players = self.context.state.turnIndices;
@@ -74,6 +36,49 @@ pub fn setOptions(self: *Self, params: UIObject.SetOptionsParameters) !void
                 .Play = .{
                     .handCardIndex = selectedAttack.cardIndex,
                 },
+            });
+        },
+        .Defense =>
+        {
+            const playerIndex = self.context.state.defenderIndex();
+            const attack = self.context.state.play.attackCard.?;
+            try printPlayersHand(self.context, playerIndex, self.cout);
+            try self.cout.print("Player {} has to beat {}\n", .{
+                playerIndex,
+                attack.asPrintable(self.context.config),
+            });
+
+            const responsesIter = core.getPossibleDefenses(self.context) catch unreachable;
+            var wrappedIter = utils.wrapIterMethod(responsesIter, ResponsePrintContext
+            {
+                .context = self.context,
+                .attack = attack,
+            });
+            const selectedResponse = try collectOptionsFromIteratorAndSelectOne(
+                self.context.allocator,
+                &wrappedIter,
+                self.cout,
+                "Take all");
+
+            const response: EventQueue.ResponseEvent = response:
+            {
+                switch (selectedResponse)
+                {
+                    .Empty =>
+                    {
+                        break :response .Take;
+                    },
+                    .Value => |v|
+                    {
+                        break :response .{
+                            .Defense = v.defense,
+                        };
+                    },
+                }
+            };
+
+            try self.context.eventQueue.addEvent(.{
+                .Response = response,
             });
         },
         .ThrowAttack =>
@@ -159,14 +164,6 @@ pub fn resetPlay(self: *Self, params: UIObject.ResetPlayParameters) !void
     try self.cout.print("Play has been reset\n", .{});
 }
 
-fn IterValueType(IterT: type) type
-{
-    const T = @TypeOf(b: {
-        var t = @as(IterT, undefined);
-        break :b t.next().?;
-    });
-    return T;
-}
 
 fn IterOutputType(IterMaybePointerT: type) type
 {
@@ -180,7 +177,7 @@ fn IterOutputType(IterMaybePointerT: type) type
             else => unreachable,
         }
     };
-    return IterValueType(IterT);
+    return utils.IterValueType(IterT);
 }
 
 fn CollectOptionsResult(IterT: type, comptime allowEmptyOption: bool) type
@@ -483,40 +480,11 @@ pub fn playerVisualCardsIterator(context: *core.GameLogicContext, playerIndex: u
     return t;
 }
 
-fn WrapIter(
-    TIter: type,
-    TContext: type,
-    // fn(@TypeOf(TIter), TContext) -> Wrapped(@TypeOf(TIter))
-    wrapFunc: anytype) type
-{
-    const IterOutputT = IterValueType(TIter);
-    const WrappedIterOutputType = @TypeOf(
-        wrapFunc(
-            @as(IterOutputT, undefined),
-            @as(TContext, undefined)));
-
-    return struct
-    {
-        const Self1 = @This();
-
-        iter: TIter,
-        context: TContext,
-
-        pub fn next(self: *Self1) ?WrappedIterOutputType
-        {
-            if (self.iter.next()) |n|
-            {
-                return wrapFunc(n, self.context);
-            }
-            return null;
-        }
-    };
-}
-
 const CardResponseWrapper = struct
 {
-    response: core.Defense,
+    defense: core.Defense,
     context: *core.GameLogicContext,
+    attack: core.Card,
 
     pub fn format(
         self: CardResponseWrapper,
@@ -524,35 +492,36 @@ const CardResponseWrapper = struct
         _: std.fmt.FormatOptions,
         writer: anytype) !void
     {
-        const r = self.response;
+        const r = self.defense;
         const playerHand = core.getDefenderHand(self.context.state);
 
         const response: core.Card = playerHand.cards.items[r.handCardIndex];
-        try writer.print("{}", .{
-            response.asPrintableWithHighlight(self.context.config, r.match.response),
+        const attack_ = self.attack;
+        const config = self.context.config;
+        try writer.print("{} > {}", .{
+            response.asPrintableWithHighlight(config, r.match.response),
+            attack_.asPrintableWithHighlight(config, r.match.attack),
         });
     }
 };
 
-fn wrapResponse(a: core.Defense, b: *core.GameLogicContext) CardResponseWrapper
+const ResponsePrintContext = struct
 {
-    return .{
-        .response = a,
-        .context = b,
-    };
-}
+    context: *core.GameLogicContext,
+    attack: core.Card,
 
-fn wrapResponseIter(context: *core.GameLogicContext, iter: core.PossibleResponsesIterator) 
-    WrapIter(core.PossibleResponsesIterator, *core.GameLogicContext, wrapResponse)
-{
-    return .{
-        .context = context,
-        .iter = iter,
-    };
-}
+    pub fn wrap(self: ResponsePrintContext, defense: core.Defense) CardResponseWrapper
+    {
+        return .{
+            .context = self.context,
+            .attack = self.attack,
+            .defense = defense,
+        };
+    }
+};
 
 fn wrapCardIndexIterator(context: PrintableCardsSlice, iter: anytype)
-    WrapIter(@TypeOf(iter), @TypeOf(context), wrapCardIndex)
+    utils.WrapIterFunc(@TypeOf(iter), @TypeOf(context), wrapCardIndex)
 {
     return .{
         .context = context,
@@ -576,7 +545,10 @@ pub fn getAndRealizeAttackerThrowOption(self: *Self, iter: *core.PossibleAttacke
     while (iter.next()) |playerIndex|
     {
         try printPlayersHand(self.context, playerIndex, self.cout);
-        try self.cout.print("Player {} selects a card to throw in:\n", .{ playerIndex });
+        try self.cout.print("Player {} selects a card to throw in (allowed side value = {}):\n", .{
+            playerIndex,
+            self.context.state.play.nextAllowedValue.?.asPrintable(self.context.config),
+        });
 
         const cardHandContext = PrintableCardsSlice.fromPlayerIndex(self.context, playerIndex);
         const cardIter = core.ThrowAttackCardIndexIterator.fromPlayerIndex(self.context, playerIndex);

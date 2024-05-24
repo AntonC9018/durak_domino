@@ -68,14 +68,7 @@ pub const PrintableCard = struct
                 try writer.print("*", .{});
             }
 
-            if (v == self.config.maxValue)
-            {
-                try writer.print(" ", .{});
-            }
-            else
-            {
-                try writer.print("{}", .{ @intFromEnum(v) });
-            }
+            try writer.print("{}", .{ v.asPrintable(self.config) });
 
             if (shouldHighlight)
             {
@@ -87,11 +80,11 @@ pub const PrintableCard = struct
 
 pub fn createCard(values: anytype) Card
 {
-    comptime std.debug.assert(values.len > maxSideCount);
+    comptime std.debug.assert(values.len <= maxSideCount);
     var card = std.mem.zeroes(Card);
-    for (card.values[0 .. values.len], &values) |*to, from|
+    inline for (card.values[0 .. values.len], &values) |*to, from|
     {
-        to.* = from;
+        to.* = @enumFromInt(from);
     }
     return card;
 }
@@ -103,6 +96,40 @@ pub const CardSide = enum(u8)
     pub fn value(a: CardSide) u8
     {
         return @intFromEnum(a);
+    }
+
+    pub fn isWildcard(a: CardSide, config: *const Config) bool
+    {
+        std.debug.assert(a.value() <= config.maxValue.value());
+        return a.value() == config.maxValue.value();
+    }
+
+    pub fn asPrintable(a: CardSide, config: *const Config) struct
+    {
+        side: CardSide,
+        config_: *const Config,
+
+        pub fn format(
+            self: @This(),
+            comptime _: []const u8,
+            _: std.fmt.FormatOptions,
+            writer: anytype) !void
+        {
+            if (self.side.isWildcard(self.config_))
+            {
+                try writer.print(" ", .{});
+            }
+            else
+            {
+                try writer.print("{d}", .{ @intFromEnum(self.side) });
+            }
+        }
+    }
+    {
+        return .{
+            .side = a,
+            .config_ = config,
+        };
     }
 };
 
@@ -285,16 +312,6 @@ fn allDefensesBeatAllAttacks(p: struct
     return false;
 }
 
-test "DefenseBeatsAttack"
-{
-    var config = Config
-    {
-        .faceCount = 2,
-        .maxValue = 2,
-    };
-    config.init();
-}
-
 pub const MatchesIteratorState = struct
 {
     attackIndex: u8 = 0,
@@ -311,30 +328,22 @@ pub const MatchesIterator = struct
 
     pub fn advance(self: *MatchesIterator) void
     {
+        std.debug.assert(!self.isDone());
+
         const s = &self.state;
-        if (s.matchingWildcards)
-        {
-            s.defenseIndex += 1;
-            return;
-        }
-
-        s.defenseIndex += 1;
-        if (s.defenseIndex < self.config.faceCount)
-        {
-            return;
-        }
-
-        s.defenseIndex = 0;
 
         s.attackIndex += 1;
         if (s.attackIndex < self.config.faceCount)
         {
             return;
         }
-
-        s.matchingWildcards = true;
         s.attackIndex = 0;
-        s.defenseIndex = 0;
+
+        s.defenseIndex += 1;
+        if (s.defenseIndex < self.config.faceCount)
+        {
+            return;
+        }
     }
 
     pub fn isDone(self: *const MatchesIterator) bool
@@ -354,52 +363,23 @@ pub const MatchesIterator = struct
             }
 
             const defenseValue = self.defenseCard.values[state.defenseIndex];
-            if (state.matchingWildcards)
+            const attackValue = self.attackCard.values[state.attackIndex];
+
+            const defenseWildcard = defenseValue.isWildcard(self.config);
+            const attackWildcard = attackValue.isWildcard(self.config);
+
+            if (!defenseWildcard and attackWildcard)
             {
-                if (defenseValue != self.config.maxValue)
-                {
-                    continue;
-                }
-
-                const largestIndex = largestIndex:
-                {
-                    var maxIndex: usize = if (state.defenseIndex == 0) 1 else 0;
-                    for ((maxIndex + 1) .., self.attackCard.getValuesSlice(self.config)) |i, b|
-                    {
-                        if (i == state.defenseIndex)
-                        {
-                            continue;
-                        }
-                        const a = self.defenseCard.values[maxIndex];
-                        if (a.value() > b.value())
-                        {
-                            maxIndex = i;
-                        }
-                    }
-                    break :largestIndex maxIndex;
-                };
-
-                return .{
-                    .response = state.defenseIndex,
-                    .attack = @intCast(largestIndex),
-                };
+                continue;
             }
-            else
+
+            if (defenseWildcard or defenseValue.value() == attackValue.value())
             {
-                const attackValue = self.attackCard.values[state.attackIndex];
-
-                if (attackValue != defenseValue)
-                {
-                    continue;
-                }
-
-                const potentialResult = ValueIndexMatchPair
+                return ValueIndexMatchPair
                 {
                     .response = state.defenseIndex,
                     .attack = state.attackIndex,
                 };
-
-                return potentialResult;
             }
         }
         return null;
@@ -411,7 +391,7 @@ test
     var helper = struct
     {
         config: Config = std.mem.zeroInit(Config, .{
-            .maxValue = 3,
+            .maxValue = @as(CardSide, @enumFromInt(6)),
             .faceCount = 2,
         }),
 
@@ -422,49 +402,64 @@ test
             self.config.init();
         }
 
-        fn wildcard(self: *const Self) CardSide
+        fn wildcard(self: *const Self) u8
         {
-            return self.config.maxValue;
+            return @intFromEnum(self.config.maxValue);
         }
+
+        const ExpectedResult =  struct
+        {
+            attack: u8,
+            response: u8,
+            beats: bool,
+        };
 
         fn doTest(
             self: *const Self,
             attackValues: anytype,
             defenseValues: anytype,
-            results: []const struct
-            {
-                attack: u8,
-                response: u8,
-                beats: bool,
-            }) !void
+            results: []const ExpectedResult) !void
         {
-            const attack = createCard(attackValues);
-            const defense = createCard(defenseValues);
-
-            const equal = std.testing.expectEqual;
-
-            var iter = MatchesIterator
+            const wrappedContext = struct
             {
-                .attackCard = attack,
-                .defenseCard = defense,
+                attack: Card,
+                defense: Card,
+                config: *const Config,
+
+                pub fn wrap(self1: @This(), match: ValueIndexMatchPair) ExpectedResult
+                {
+                    const beats = allDefensesBeatAllAttacks(.{
+                        .defense = self1.defense,
+                        .attack = self1.attack,
+                        .match = match,
+                        .config = self1.config,
+                    });
+                    return .{
+                        .attack = match.attack,
+                        .response = match.response,
+                        .beats = beats,
+                    };
+                }
+            }{
+                .attack = createCard(attackValues),
+                .defense = createCard(defenseValues),
+                .config = &self.config,
+            };
+            const iter = MatchesIterator
+            {
+                .attackCard = wrappedContext.attack,
+                .defenseCard = wrappedContext.defense,
                 .config = &self.config,
             };
 
-            for (results) |r|
-            {
-                const a = iter.next().?;
-                try equal(r.attack, a.attack);
-                try equal(r.response, a.response);
-                const beats = allDefensesBeatAllAttacks(.{
-                    .attack = attack,
-                    .defense = defense,
-                    .config = &self.config,
-                    .match = a,
-                });
-                try equal(r.beats, beats);
-            }
+            const utils = @import("utils.zig");
+            const allocator = std.testing.allocator;
+            const wrappedIter = utils.wrapIterMethod(iter, wrappedContext);
+            var actualResults = try utils.enumerateAlloc(wrappedIter, allocator);
+            // std.debug.print("{any}\n", .{ actualResults.items });
+            defer actualResults.deinit(allocator);
 
-            try equal(null, iter.next());
+            try std.testing.expectEqualDeep(results, actualResults.items);
         }
     }{};
     helper.init();
@@ -472,7 +467,7 @@ test
     try helper.doTest(
         .{ 0, 1 },
         .{ 1, 2 },
-        .{
+        &.{
             .{
                 .attack = 1,
                 .response = 0,
@@ -482,7 +477,12 @@ test
     try helper.doTest(
         .{ 0, 2 },
         .{ helper.wildcard(), 1 },
-        .{
+        &.{
+            .{
+                .attack = 0,
+                .response = 0,
+                .beats = false,
+            },
             .{
                 .attack = 1,
                 .response = 0,
@@ -492,9 +492,77 @@ test
     try helper.doTest(
         .{ helper.wildcard(), 1 },
         .{ helper.wildcard(), helper.wildcard() },
-        .{
+        &.{
             .{
+                .attack = 0,
+                .response = 0,
+                .beats = true,
             },
+            .{
+                .attack = 1,
+                .response = 0,
+                .beats = false,
+            },
+            .{
+                .attack = 0,
+                .response = 1,
+                .beats = true,
+            },
+            .{
+                .attack = 1,
+                .response = 1,
+                .beats = false,
+            },
+        });
+    try helper.doTest(
+        .{ 0, 1 },
+        .{ helper.wildcard(), helper.wildcard() },
+        &.{
+            .{
+                .attack = 0,
+                .response = 0,
+                .beats = true,
+            },
+            .{
+                .attack = 1,
+                .response = 0,
+                .beats = true,
+            },
+            .{
+                .attack = 0,
+                .response = 1,
+                .beats = true,
+            },
+            .{
+                .attack = 1,
+                .response = 1,
+                .beats = true,
+            },
+        });
+    try helper.doTest(
+        .{ 1, 1 },
+        .{ 1, 0 },
+        &.{
+            .{
+                .attack = 0,
+                .response = 0,
+                .beats = false,
+            },
+            .{
+                .attack = 1,
+                .response = 0,
+                .beats = false,
+            },
+        });
+    try helper.doTest(
+        .{ 0, 1 },
+        .{ 2, 3 },
+        &.{
+        });
+    try helper.doTest(
+        .{ 1, 1 },
+        .{ 2, 5 },
+        &.{
         });
 }
 
@@ -536,13 +604,14 @@ pub const PossibleResponsesIterator = struct
     fn debugPrint(self: *PossibleResponsesIterator, comparisonResult: bool) !void
     {
         const stderr = std.io.getStdErr().writer();
-        try stderr.print("{} {s} {}\n", .{
+        try stderr.print("{} {s} {} at index {}\n", .{
             self.matchesIterator.defenseCard.asPrintable(self.config),
             if (comparisonResult)
                 " > "
             else
                 " < ",
             self.matchesIterator.attackCard.asPrintable(self.config),
+            self.handCardIndex,
         });
     }
 
@@ -554,12 +623,12 @@ pub const PossibleResponsesIterator = struct
             {
                 const defense = self.matchesIterator.defenseCard;
                 const attack = self.matchesIterator.attackCard;
-                const n = self.matchesIterator.next() orelse break;
+                const match = self.matchesIterator.next() orelse break;
 
                 const canDefend = allDefensesBeatAllAttacks(.{
                     .defense = defense,
                     .attack = attack,
-                    .match = n,
+                    .match = match,
                     .config = self.config,
                 });
 
@@ -567,15 +636,20 @@ pub const PossibleResponsesIterator = struct
 
                 if (canDefend)
                 {
-                    return .{
+                    const result = Defense
+                    {
                         .handCardIndex = self.handCardIndex,
-                        .match = n,
+                        .match = match,
                     };
+                    return result;
                 }
             }
 
-            self.resetMatchesIterator();
             self.handCardIndex += 1;
+            if (!self.isDone())
+            {
+                self.resetMatchesIterator();
+            }
         }
         return null;
     }
@@ -777,7 +851,6 @@ fn respond(context: *GameLogicContext, response: Defense) !void
     play.attackCard = null;
 
     const allowedValue = attackCard.values[response.match.attack];
-    // std.debug.print("Allowed: {}, Response: {}\n", .{allowedValue, responseCard.values[response.match.response] });
 
     play.nextAllowedValue = allowedValue;
     try play.completePairs.append(context.allocator, .{
@@ -851,6 +924,64 @@ pub fn findNextNotDonePlayerIndex(context: *GameLogicContext, startIndex: u8, st
         }
     }
 }
+
+pub const NextPlayerIterator = struct
+{
+    options: Options,
+    currentIndex: u8,
+    repeatCount: usize,
+
+    const Options = struct
+    {
+        stopIndex: u8,
+        playerCount: u8,
+        stopAtRepeatCount: usize,
+    };
+
+    const CreationOptions = struct
+    {
+        startIndex: u8,
+        stopIndex: ?u8,
+        config: *const Config,
+    };
+
+    pub fn create(options_: CreationOptions) NextPlayerIterator
+    {
+        const stopIndex = options_.stopIndex orelse options_.startIndex;
+        const increaseRepeatCount = if (options_.stopIndex) false else true;
+        return .{
+            .options = .{
+                .stopIndex = stopIndex,
+                .playerCount = options_.config.playerCount,
+                .stopAtRepeatCount = if (increaseRepeatCount) 1 else 0,
+            },
+            .currentIndex = options_.startIndex,
+            .repeatCount = 0,
+        };
+    }
+
+    pub fn next(self: *NextPlayerIterator) ?u8
+    {
+        defer
+        {
+            self.currentIndex = (self.currentIndex +% 1) % self.options.playerCount;
+        }
+        if (self.currentIndex != self.options.stopIndex)
+        {
+            return self.currentIndex;
+        }
+
+        defer self.repeatCount += 1;
+        if (self.repeatCount < self.options.stopAtRepeatCount)
+        {
+            return self.currentIndex;
+        }
+
+        return null;
+    }
+};
+
+// pub const NextPlayerIteratorInclusive = struct{}
 
 fn moveTurnToNextPlayer(context: *GameLogicContext) !void
 {
@@ -937,22 +1068,22 @@ fn redraw(context: *GameLogicContext) !void
     }
 
     const startIndex = context.state.defenderIndex();
-    var currentIndex = startIndex;
 
     var addedList = std.ArrayList(UIObject.PlayerDraw).init(context.allocator);
     defer addedList.deinit();
 
+    // This has to be smarter, because it has to evenly distribute the cards.
+    var playerIter = NextPlayerIterator.create(.{
+        .startIndex = startIndex,
+        .config = context.config,
+    });
     while (drawPile.items.len > 0)
     {
+        const currentIndex = playerIter.next() orelse break;
         const hand = &context.state.hands.items[currentIndex];
         if (hand.cards.items.len >= context.config.handSize)
         {
-            currentIndex = (currentIndex +% 1) % context.config.playerCount;
-
-            if (currentIndex == startIndex)
-            {
-                break;
-            }
+            continue;
         }
 
         const cardCountWouldLikeToAdd = context.config.handSize - hand.cards.items.len;
@@ -995,8 +1126,11 @@ fn takePlayIntoHand(context: *GameLogicContext) !void
         try hand.cards.append(context.allocator, a);
     }
 
-    // TODO: Add take event
-    _ = try movePlayPairsInto(context.allocator, play, &hand.cards);
+    if (play.completePairs.items.len > 0)
+    {
+        // TODO: Add take event
+        _ = try movePlayPairsInto(context.allocator, play, &hand.cards);
+    }
 
     try resetPlay(context);
 }
@@ -1259,7 +1393,6 @@ fn processEvents(context: *GameLogicContext) !bool
     while (i < events.items.len) : (i += 1)
     {
         const ev = events.items[i];
-        std.debug.print("Reading off the event {any}\n", .{ ev });
         switch (ev)
         {
             .Play => |play|
