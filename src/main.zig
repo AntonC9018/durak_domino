@@ -22,9 +22,10 @@ pub fn main() !void
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     const allocator = gpa.allocator();
 
+    var allocators = core.Allocators.create(allocator);
     var context = core.GameLogicContext
     {
-        .allocator = allocator,
+        .allocators = &allocators,
         .state = &gameState,
         .randomState = std.rand.DefaultPrng.init(@bitCast(std.time.timestamp())),
         .config = &config,

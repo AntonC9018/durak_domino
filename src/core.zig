@@ -189,15 +189,35 @@ pub const GameState = struct
     }
 };
 
+pub const Allocators = struct
+{
+    general: std.mem.Allocator,
+    event: std.heap.ArenaAllocator,
+    play: std.heap.ArenaAllocator,
+
+    pub fn create(allocator: std.mem.Allocator) Allocators
+    {
+        return .{
+            .general = allocator,
+            .event = std.heap.ArenaAllocator.init(allocator),
+            .play = std.heap.ArenaAllocator.init(allocator),
+        };
+    }
+};
 
 pub const GameLogicContext = struct
 {
     config: *Config,
     state: *GameState,
-    allocator: std.mem.Allocator,
+    allocators: *Allocators,
     randomState: std.rand.Xoshiro256,
     ui: UIObject,
     eventQueue: EventQueue,
+
+    pub fn allocator(self: GameLogicContext) std.mem.Allocator
+    {
+        return self.allocators.general;
+    }
 };
 
 pub const CardPair = struct
@@ -220,7 +240,7 @@ pub const PlayState = struct
     pub fn reset(self: *PlayState) void
     {
         self.attackCard = null;
-        self.completePairs.items.len = 0;
+        self.completePairs = .{};
         self.nextAllowedValue = null;
     }
 };
@@ -728,10 +748,10 @@ pub fn resetState(context: *GameLogicContext) !void
 
     // Generate deck
     try context.state.discardPile.ensureTotalCapacityPrecise(
-        context.allocator,
+        context.allocator(),
         context.config.deckSize);
     try context.state.drawPile.ensureTotalCapacityPrecise(
-        context.allocator,
+        context.allocator(),
         context.config.deckSize);
 
     {
@@ -776,11 +796,11 @@ pub fn resetState(context: *GameLogicContext) !void
         {
             for (hands.items[context.config.playerCount .. oldPlayerCount]) |*hand|
             {
-                hand.cards.deinit(context.allocator);
+                hand.cards.deinit(context.allocator());
             }
         }
 
-        try hands.resize(context.allocator, context.config.playerCount);
+        try hands.resize(context.allocator(), context.config.playerCount);
 
         if (oldPlayerCount < context.config.playerCount)
         {
@@ -796,7 +816,7 @@ pub fn resetState(context: *GameLogicContext) !void
     {
         const handSize = context.config.handSize;
 
-        try hand.cards.resize(context.allocator, handSize);
+        try hand.cards.resize(context.allocator(), handSize);
         const drawPile = &context.state.drawPile.items;
         for (hand.cards.items, drawPile.*[(drawPile.len - handSize) ..]) |*card, draw|
         {
@@ -853,7 +873,7 @@ fn respond(context: *GameLogicContext, response: Defense) !void
     const allowedValue = attackCard.values[response.match.attack];
 
     play.nextAllowedValue = allowedValue;
-    try play.completePairs.append(context.allocator, .{
+    try play.completePairs.append(context.allocators.play.allocator(), .{
         .attack = attackCard,
         .response = responseCard,
     });
@@ -941,14 +961,14 @@ pub const NextPlayerIterator = struct
     const CreationOptions = struct
     {
         startIndex: u8,
-        stopIndex: ?u8,
+        stopIndex: ?u8 = null,
         config: *const Config,
     };
 
     pub fn create(options_: CreationOptions) NextPlayerIterator
     {
         const stopIndex = options_.stopIndex orelse options_.startIndex;
-        const increaseRepeatCount = if (options_.stopIndex) false else true;
+        const increaseRepeatCount = if (options_.stopIndex != null) false else true;
         return .{
             .options = .{
                 .stopIndex = stopIndex,
@@ -981,7 +1001,17 @@ pub const NextPlayerIterator = struct
     }
 };
 
-// pub const NextPlayerIteratorInclusive = struct{}
+fn maybeMoveTurnToNextPlayer(context: *GameLogicContext) !void
+{
+    moveTurnToNextPlayer(context) catch |err|
+    {
+        switch (err)
+        {
+            error.GameOver => {},
+            else => |e| return e,
+        }
+    };
+}
 
 fn moveTurnToNextPlayer(context: *GameLogicContext) !void
 {
@@ -1043,7 +1073,7 @@ fn endPlay(context: *GameLogicContext) !void
     }
 
     const moved = try movePlayPairsInto(
-        context.allocator,
+        context.allocator(),
         play,
         &context.state.discardPile);
 
@@ -1057,6 +1087,8 @@ fn resetPlay(context: *GameLogicContext) !void
 {
     context.state.play.reset();
     try context.ui.resetPlay(.{});
+
+    _ = context.allocators.play.reset(.retain_capacity);
 }
 
 fn redraw(context: *GameLogicContext) !void
@@ -1069,8 +1101,9 @@ fn redraw(context: *GameLogicContext) !void
 
     const startIndex = context.state.defenderIndex();
 
-    var addedList = std.ArrayList(UIObject.PlayerDraw).init(context.allocator);
-    defer addedList.deinit();
+    var addedList = std.ArrayList(UIObject.PlayerDraw)
+        .init(context.allocators.event.allocator());
+    // defer addedList.deinit();
 
     // This has to be smarter, because it has to evenly distribute the cards.
     var playerIter = NextPlayerIterator.create(.{
@@ -1091,7 +1124,7 @@ fn redraw(context: *GameLogicContext) !void
         const actuallyAddedCardCount = @min(availableCardCount, cardCountWouldLikeToAdd);
         const removedFromIndex = drawPile.items.len - actuallyAddedCardCount;
         const removedSlice = drawPile.items[removedFromIndex ..];
-        const addedSlice = try hand.cards.addManyAsSlice(context.allocator, actuallyAddedCardCount);
+        const addedSlice = try hand.cards.addManyAsSlice(context.allocator(), actuallyAddedCardCount);
         for (removedSlice, addedSlice) |drawn, *into|
         {
             into.* = drawn;
@@ -1123,13 +1156,14 @@ fn takePlayIntoHand(context: *GameLogicContext) !void
     const hand = &context.state.hands.items[context.state.defenderIndex()];
     if (play.attackCard) |a|
     {
-        try hand.cards.append(context.allocator, a);
+        std.debug.print("Adding {} to hand\n", .{ a.asPrintable(context.config) });
+        try hand.cards.append(context.allocator(), a);
     }
 
     if (play.completePairs.items.len > 0)
     {
         // TODO: Add take event
-        _ = try movePlayPairsInto(context.allocator, play, &hand.cards);
+        _ = try movePlayPairsInto(context.allocator(), play, &hand.cards);
     }
 
     try resetPlay(context);
@@ -1336,14 +1370,14 @@ fn endPlayAndTurn(context: *GameLogicContext) !void
 {
     try endPlay(context);
     try redraw(context);
-    try moveTurnToNextPlayer(context);
+    try maybeMoveTurnToNextPlayer(context);
 }
 
 fn takeAndEndPlayAndTurn(context: *GameLogicContext) !void
 {
     try takePlayIntoHand(context);
     try redraw(context);
-    try moveTurnToNextPlayer(context);
+    try maybeMoveTurnToNextPlayer(context);
 }
 
 fn endPlayAndTurnIfDefenderCantRespondAnymore(context: *GameLogicContext) !void
@@ -1392,6 +1426,8 @@ fn processEvents(context: *GameLogicContext) !bool
     var i: usize = 0;
     while (i < events.items.len) : (i += 1)
     {
+        defer _ = context.allocators.event.reset(.retain_capacity);
+
         const ev = events.items[i];
         switch (ev)
         {
@@ -1405,7 +1441,7 @@ fn processEvents(context: *GameLogicContext) !bool
                 {
                     .Take => 
                     {
-                        try takePlayIntoHand(context);
+                        try takeAndEndPlayAndTurn(context);
                     },
                     .Defense => |v|
                     {

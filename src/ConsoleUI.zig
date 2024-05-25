@@ -27,7 +27,7 @@ pub fn setOptions(self: *Self, params: UIObject.SetOptionsParameters) !void
                     .count = cardsInHand.len,
                 }));
             const selectedAttack = try collectOptionsFromIteratorAndSelectOne(
-                self.context.allocator,
+                self.context.allocators.event.allocator(),
                 &wrappedIter,
                 self.cout,
                 null);
@@ -55,7 +55,7 @@ pub fn setOptions(self: *Self, params: UIObject.SetOptionsParameters) !void
                 .attack = attack,
             });
             const selectedResponse = try collectOptionsFromIteratorAndSelectOne(
-                self.context.allocator,
+                self.context.allocator(),
                 &wrappedIter,
                 self.cout,
                 "Take all");
@@ -554,7 +554,7 @@ pub fn getAndRealizeAttackerThrowOption(self: *Self, iter: *core.PossibleAttacke
         const cardIter = core.ThrowAttackCardIndexIterator.fromPlayerIndex(self.context, playerIndex);
         var printableIter = wrapCardIndexIterator(cardHandContext, cardIter);
         const selectedOption = try collectOptionsFromIteratorAndSelectOne(
-            self.context.allocator,
+            self.context.allocator(),
             &printableIter,
             self.cout,
             "Skip");
